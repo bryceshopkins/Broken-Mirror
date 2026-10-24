@@ -179,6 +179,10 @@ let boss = null;
 // Health: each runner has its own HP, and if either one hits 0 the run is over, so you have to look
 // after both. Every hit goes through hurtRunner (the place to hook in armor later), with these amounts:
 const MAX_HP = 100, INVULN_T = 1.2;  // s of invulnerability after a hit (each runner has its own)
+// Healing beyond bandages: a slow regen that kicks in a while after the last hit, health orbs that
+// enemies sometimes drop (only while that runner is hurt), and a few big ones from every boss.
+const REGEN = { delay: 5, rate: 0.35 };  // s after a hit before it starts; HP per second
+const HEALTH_DROP = { chance: 0.08, enemyHeal: 10, bossHeal: 25, bossCount: 2 };
 const DAMAGE = { enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45 };
 const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5 };  // thrown at chest height
 const SHURIKEN_DROP_WEIGHTS = [25, 35, 25, 10, 5];  // index = how many a thrower drops (0-4)
@@ -228,7 +232,7 @@ function startGame() {
   // Inputs are shared, but each runner has its own body so they can stand on different planes,
   // and its own inventory so they can carry different weapons.
   const body = side => {
-    const r = { hp: MAX_HP, hpLag: MAX_HP, invuln: 0, cds: {}, side, y: 0, vy: 0, grounded: true, sliding: false, dropT: 0, inv: Array(HOTBAR + BAG).fill(null), slot: 0, switchAt: -9,
+    const r = { hp: MAX_HP, hpLag: MAX_HP, hitAt: -99, invuln: 0, cds: {}, side, y: 0, vy: 0, grounded: true, sliding: false, dropT: 0, inv: Array(HOTBAR + BAG).fill(null), slot: 0, switchAt: -9,
                 attack: 'punch', swingT: 99, attackCd: 0, queued: 0, hits: new Set() };
     START_BAG[side].forEach(([key, n = 1], i) => { r.inv[HOTBAR + i] = { key, n }; });
     return r;
@@ -453,7 +457,7 @@ function obstacleBox(o, gy) {
   if (o.type === 'ledge') return { d0: o.d - o.len / 2, d1: o.d + o.len / 2, y0: gy - o.h, y1: gy };
   if (o.type === 'spike') return { d0: o.d - 16, d1: o.d + 16, y0: gy + o.y - 20, y1: gy + o.y };
   if (o.type === 'bar')   return { d0: o.d - 26, d1: o.d + 26, y0: 0, y1: gy + o.y - 46 };
-  if (o.type === 'coin' || o.type === 'item') return { d0: o.d - 14, d1: o.d + 14, y0: gy + o.y - 14, y1: gy + o.y + 14 };
+  if (o.type === 'coin' || o.type === 'item' || o.type === 'health') return { d0: o.d - 14, d1: o.d + 14, y0: gy + o.y - 14, y1: gy + o.y + 14 };
   if (o.type === 'star' || o.type === 'grenade') return { d0: o.d - 9, d1: o.d + 9, y0: gy + o.y - 9, y1: gy + o.y + 9 };
   return { d0: o.d - 14, d1: o.d + 14, y0: gy + o.y - 72, y1: gy + o.y }; // enemy
 }
@@ -501,6 +505,7 @@ function update(dt) {
   for (const lane of lanes) {
     const r = lane.body;
     r.invuln -= dt;
+    if (r.hp > 0 && r.hp < MAX_HP && time - r.hitAt > REGEN.delay) r.hp = Math.min(MAX_HP, r.hp + REGEN.rate * dt);
     r.hpLag = r.hpLag > r.hp ? Math.max(r.hp, r.hpLag - 60 * dt) : r.hp;  // the bar's "just lost" chunk drains away
     for (const k in r.cds) r.cds[k] = Math.max(0, r.cds[k] - dt);
   }
@@ -599,6 +604,14 @@ function update(dt) {
       }
       const b = obstacleBox(o, gy);
       const touching = b.d0 < pb.d1 && b.d1 > pb.d0 && b.y0 < pb.y1 && b.y1 > pb.y0;
+      if (o.type === 'health') {  // heals whoever grabs it; left lying there if they're already full
+        if (touching && !(o.grace > 0) && r.hp < MAX_HP) {
+          o.dead = true; r.hp = Math.min(MAX_HP, r.hp + o.heal); r.hpLag = Math.max(r.hpLag, r.hp);
+          burst(o.d, gy + o.y, 12, 0.5, lane.side, '#5bd16a');
+          popups.push({ x: player.off, y: gy + r.y - 100, vx: 0, vy: -160, text: '+' + o.heal + ' HP', word: true, heal: true, side: lane.side, life: 0.9, age: 0 });
+        }
+        continue;
+      }
       if (o.type === 'coin') {
         if (touching && !(o.grace > 0)) {  // dropped coins pop out for a moment before you can grab them
           o.dead = true; wallet++; player.coins++; saveWallet();
@@ -677,7 +690,7 @@ function update(dt) {
 
 function hurtRunner(lane, dmg, gy, o = {}) {
   const r = lane.body;
-  o.hit = true; r.invuln = INVULN_T; shake = 16;
+  o.hit = true; r.invuln = INVULN_T; r.hitAt = time; shake = 16;
   r.hp = Math.max(0, r.hp - dmg);
   burst(player.off, gy + r.y - 35, 20, 1.2, lane.side);
   popups.push({ x: player.off, y: gy + r.y - 95, vx: -40, vy: -220, text: '-' + dmg, hurt: true, side: lane.side, life: 0.9, age: 0 });
@@ -692,6 +705,10 @@ function rollCoinDrop() {
   let r = Math.random() * COIN_DROP_WEIGHTS.reduce((a, b) => a + b);
   for (let n = 1; n < COIN_DROP_WEIGHTS.length; n++) if ((r -= COIN_DROP_WEIGHTS[n]) < 0) return n;
   return 1;
+}
+function dropHealth(lane, e, heal) {
+  lane.obs.push({ type: 'health', heal, d: e.d, y: e.y - 40, t: Math.random() * 6, dead: false, hit: false,
+                  vd: 40 + Math.random() * 160, vy: -420 - Math.random() * 200, grace: 0.15 });
 }
 function dropCoins(lane, e) {
   const n = rollCoinDrop();
@@ -764,6 +781,7 @@ function hitEnemy(o, lane, gy, weapon = PUNCH) {
     burst(o.d, fy - 45, crit ? 40 : 26, crit ? 1.8 : 1.3, lane.side);
     if (crit) burst(o.d, fy - 45, 24, 1.5, lane.side, '#ffd23f');
     dropCoins(lane, o);
+    if (lane.body.hp < MAX_HP && Math.random() < HEALTH_DROP.chance) dropHealth(lane, o, HEALTH_DROP.enemyHeal);
     if (o.kind === 'thrower') dropItems(lane, o, 'shuriken', rollWeighted(SHURIKEN_DROP_WEIGHTS));
     // the enemy's body snaps apart into flying sticks
     for (let i = 0; i < 6; i++) particles.push({
@@ -893,7 +911,7 @@ const ARENA = {
 function setupArena() {
   const half = W / 2;
   for (const lane of lanes) {
-    const loot = lane.obs.filter(o => o.type === 'coin' || o.type === 'item');
+    const loot = lane.obs.filter(o => o.type === 'coin' || o.type === 'item' || o.type === 'health');
     lane.obs = [...loot, ...ARENA[lane.side].map(([p, len, h0], i) =>
       ({ type: 'platform', d: half * p, len, h: h0 + H, h0, delay: 0.1 + i * 0.16, y: 0, t: 0, dead: false }))];
     Object.assign(lane.body, { sliding: false, deflectT: 0 });
@@ -1142,6 +1160,7 @@ function bossExplode(gy) {
       life: 1.6, side: lane.side, stick: 18 + Math.random() * 18, rot: Math.random() * 6, spin: (Math.random() - 0.5) * 24 });
     // loot: a shower of coins on both sides, and the club goes to whoever landed the final blow
     for (let i = 0; i < 2; i++) dropCoins(lane, { d: d - 30, y: 0 });
+    for (let i = 0; i < HEALTH_DROP.bossCount; i++) dropHealth(lane, { d: d - 30, y: 0 }, HEALTH_DROP.bossHeal);
     for (let i = 0; i < 6; i++) lane.obs.push({ type: 'coin', d: d - 30, y: -40, t: Math.random() * 6, dead: false, hit: false,
       vd: -60 - Math.random() * 240, vy: -380 - Math.random() * 300, grace: 0.15 });
     if (lane.side === b.killSide) {
@@ -1156,7 +1175,7 @@ function magnetLoot(dt, gy) {
   for (const lane of lanes) {
     const r = lane.body;
     for (const o of lane.obs) {
-      if (o.type !== 'coin' && o.type !== 'item') continue;
+      if (o.type !== 'coin' && o.type !== 'item' && !(o.type === 'health' && r.hp < MAX_HP)) continue;
       o.vy = null; o.grace = 0;
       const k = Math.min(1, 7 * dt);
       o.d += (player.off - o.d) * k; o.y += (r.y - 35 - o.y) * k;
@@ -1597,6 +1616,15 @@ function drawLane(lane, sky) {
       ctx.fill();
       ctx.fillStyle = sky.accent;
       for (let i = 0; i < 3; i++) ctx.fillRect(o.d - 12 + i * 11, by - 22, 2, 4);
+    }
+    else if (o.type === 'health') {  // a glowing green orb with a white cross, bigger for bigger heals
+      const x = o.d, y = gy + o.y + Math.sin(o.t * 3) * 2, rad = o.heal >= 20 ? 13 : 10;
+      ctx.save(); ctx.shadowColor = '#5bd16a'; ctx.shadowBlur = 14 + Math.sin(o.t * 5) * 4;
+      ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(x, y, rad + 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#5bd16a'; ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0; ctx.fillStyle = '#ffffff';
+      ctx.fillRect(x - rad * 0.55, y - rad * 0.18, rad * 1.1, rad * 0.36); ctx.fillRect(x - rad * 0.18, y - rad * 0.55, rad * 0.36, rad * 1.1);
+      ctx.restore();
     }
     else if (o.type === 'coin') {
       const s = Math.abs(Math.cos(o.t * 4)) * 0.8 + 0.2;  // spinning
