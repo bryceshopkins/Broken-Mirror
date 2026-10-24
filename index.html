@@ -124,7 +124,7 @@ const PUNCH = { name: 'Fists', rarity: 'common', melee: true, anim: 'punch', att
 //   throwSpeed  thrown, one per attack, used up from the stack (`lob`: falls and bounces, like the grenade)
 //   beam        fires a piercing laser at the cursor; `auto` keeps firing while the mouse is held
 //   aoe         explodes, hitting everything within this radius (you too, if you're close)
-//   heal        lives restored when used from the hotbar
+//   heal        HP restored when used from the hotbar (`cooldown`: seconds before that runner can use another)
 //   stack       how many fit in one slot (default 1)
 //   type        what the tooltip calls items that aren't weapons
 const RARITY = { common: '#ffffff', uncommon: '#5bd16a', rare: '#4da6ff', epic: '#c77dff', legendary: '#ff9f1c' };
@@ -138,7 +138,7 @@ const ITEMS = {
   grenade: { name: 'Grenade', rarity: 'uncommon', stack: 20, attackSpeed: 'slow', min: 50, max: 50, critChance: 0, critMult: 1,
              throwSpeed: 560, lob: true, aoe: 110, swing: { dur: 0.3, hit: [0, 0] },
              desc: 'This little bundle of joy has the ability to completely obliterate anybody that is unfortunate enough to be on the receiving end of the explosion, including the thrower themselves if they get too close. And you wonder why women live longer than men.' },
-  bandage: { name: 'Bandage', rarity: 'common', type: 'Consumable', stack: 10, heal: 1,
+  bandage: { name: 'Bandage', rarity: 'common', type: 'Consumable', stack: 10, heal: 15, cooldown: 15,
              desc: 'Gives 15 healthpoints. 15 second cooldown. Increased effectiveness when paired with a kiss to your boo boo, but we don\'t sell those.' },
   obliterator: { name: 'The Obliterator', rarity: 'legendary', beam: true, auto: true, attackSpeed: 'extreme', min: 200, max: 200,
                  critChance: 0.1, critMult: 2, swing: { dur: 0.07, hit: [0, 0] },
@@ -175,7 +175,10 @@ const BOSS = {
   rage: { roar: 1.0, windup: 1.0, swing: 0.24, back: 0.4, recover: 1.0 },
 };
 let boss = null;
-const MAX_LIVES = 3;
+// Health: each runner has its own HP, and if either one hits 0 the run is over, so you have to look
+// after both. Every hit goes through hurtRunner (the place to hook in armor later), with these amounts:
+const MAX_HP = 100, INVULN_T = 1.2;  // s of invulnerability after a hit (each runner has its own)
+const DAMAGE = { enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45 };
 const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5 };  // thrown at chest height
 const SHURIKEN_DROP_WEIGHTS = [25, 35, 25, 10, 5];  // index = how many a thrower drops (0-4)
 
@@ -220,11 +223,11 @@ function moveStack(r, a, b) {
 function selectSlot(lane, i) { lane.body.slot = i; lane.body.switchAt = time; }
 
 function startGame() {
-  player = { off: 120, coins: 0, invuln: 0, lives: 3, phase: 0 };
+  player = { off: 120, coins: 0, phase: 0 };
   // Inputs are shared, but each runner has its own body so they can stand on different planes,
   // and its own inventory so they can carry different weapons.
   const body = side => {
-    const r = { y: 0, vy: 0, grounded: true, sliding: false, dropT: 0, inv: Array(HOTBAR + BAG).fill(null), slot: 0, switchAt: -9,
+    const r = { hp: MAX_HP, hpLag: MAX_HP, invuln: 0, cds: {}, side, y: 0, vy: 0, grounded: true, sliding: false, dropT: 0, inv: Array(HOTBAR + BAG).fill(null), slot: 0, switchAt: -9,
                 attack: 'punch', swingT: 99, attackCd: 0, queued: 0, hits: new Set() };
     START_BAG[side].forEach(([key, n = 1], i) => { r.inv[HOTBAR + i] = { key, n }; });
     return r;
@@ -494,7 +497,12 @@ function update(dt) {
     player.off = Math.max(60, off > max ? Math.max(max, Math.min(off, player.off - 160 * dt)) : off);
   }
 
-  player.invuln -= dt;
+  for (const lane of lanes) {
+    const r = lane.body;
+    r.invuln -= dt;
+    r.hpLag = r.hpLag > r.hp ? Math.max(r.hp, r.hpLag - 60 * dt) : r.hp;  // the bar's "just lost" chunk drains away
+    for (const k in r.cds) r.cds[k] = Math.max(0, r.cds[k] - dt);
+  }
   // Clicking attacks with both runners at once: a runner carrying shurikens throws one,
   // an empty-handed runner punches. Each runner has its own cooldown from its weapon's attack
   // speed, so a slow club can be mid-swing while the other side is still punching.
@@ -519,12 +527,13 @@ function update(dt) {
       const hand = { d: player.off + 18, y: r.y - STAR.y };
       const aim = { d: Math.min(mouse.x, W - mouse.x), y: mouse.y - gy };
       const dx = aim.d - hand.d, dy = aim.y - hand.y, len = Math.hypot(dx, dy) || 1;
-      if (it && it.heal) {  // bandages: patch up a life (not wasted at full health)
-        if (player.lives < MAX_LIVES) {
-          player.lives = Math.min(MAX_LIVES, player.lives + it.heal);
+      if (it && it.heal) {  // bandages heal the runner holding one (not wasted at full health or on cooldown)
+        if (r.hp < MAX_HP && !(r.cds[st.key] > 0)) {
+          r.hp = Math.min(MAX_HP, r.hp + it.heal); r.hpLag = r.hp;
+          r.cds[st.key] = it.cooldown || 0;
           if (!--st.n) r.inv[r.slot] = null;
-          burst(player.off, gy + r.y - 40, 14, 0.6, lane.side, '#ff6b8a');
-          popups.push({ x: player.off, y: gy + r.y - 100, vx: 0, vy: -160, text: '+' + it.heal + ' LIFE', word: true, side: lane.side, life: 0.9, age: 0 });
+          burst(player.off, gy + r.y - 40, 14, 0.6, lane.side, '#5bd16a');
+          popups.push({ x: player.off, y: gy + r.y - 100, vx: 0, vy: -160, text: '+' + it.heal + ' HP', word: true, heal: true, side: lane.side, life: 0.9, age: 0 });
         }
         r.attackCd = 0.4;
         continue;
@@ -597,7 +606,7 @@ function update(dt) {
         continue;
       }
       if (o.type === 'wave') {  // shockwaves roll along the ground: jump them or get up on a platform
-        if (!o.hit && player.invuln <= 0 && r.y > -BOSS.waveH && Math.abs(o.d - player.off) < 24) hurtPlayer(o, gy);
+        if (!o.hit && r.invuln <= 0 && r.y > -BOSS.waveH && Math.abs(o.d - player.off) < 24) hurtRunner(lane, DAMAGE.wave, gy, o);
         if (o.d < -30) o.dead = true;
         continue;
       }
@@ -627,14 +636,14 @@ function update(dt) {
           popups.push({ x: o.d, y: gy + o.y - 34, vx: 30, vy: -200, text: 'DEFLECT', word: true, side: lane.side, life: 0.8, age: 0 });
           continue;
         }
-        if (touching && player.invuln <= 0) { hurtPlayer(o, gy); o.dead = true; }
+        if (touching && r.invuln <= 0) { hurtRunner(lane, DAMAGE.star, gy, o); o.dead = true; }
         continue;
       }
       // Blocks and ledges are safe to stand on; only running into the side hurts,
       // and then you get bumped up on top so you're not stuck inside the wall.
       if (isSolid(o)) {
         if (r.y <= -supportTop(o) + 8 || !touching) continue;
-        if (!o.hit && player.invuln <= 0) hurtPlayer(o, gy);
+        if (!o.hit && r.invuln <= 0) hurtRunner(lane, DAMAGE[o.type], gy, o);
         r.y = -supportTop(o); r.vy = 0; r.grounded = true;
         continue;
       }
@@ -646,7 +655,7 @@ function update(dt) {
         hitEnemy(o, lane, gy, attackOf(r));
         continue;
       }
-      if (!o.hit && player.invuln <= 0 && touching) hurtPlayer(o, gy);
+      if (!o.hit && r.invuln <= 0 && touching) hurtRunner(lane, DAMAGE[o.type] || DAMAGE.enemy, gy, o);
     }
     if (boss) bossVsRunner(lane, r, pb, hitting, gy);
     lane.obs = lane.obs.filter(o => o.d + (o.len || 0) / 2 > -60 && !o.dead);
@@ -665,11 +674,14 @@ function update(dt) {
   shake *= Math.pow(0.002, dt);
 }
 
-function hurtPlayer(o, gy) {
-  o.hit = true; player.lives--; player.invuln = 1.2; shake = 16;
-  burst(player.off, gy - 35, 20, 1.2);
-  if (player.lives <= 0) {
-    game.state = 'over'; game.best = Math.max(game.best, Math.floor(distance / 10));
+function hurtRunner(lane, dmg, gy, o = {}) {
+  const r = lane.body;
+  o.hit = true; r.invuln = INVULN_T; shake = 16;
+  r.hp = Math.max(0, r.hp - dmg);
+  burst(player.off, gy + r.y - 35, 20, 1.2, lane.side);
+  popups.push({ x: player.off, y: gy + r.y - 95, vx: -40, vy: -220, text: '-' + dmg, hurt: true, side: lane.side, life: 0.9, age: 0 });
+  if (r.hp <= 0) {  // one down is everyone down
+    game.state = 'over'; game.fallen = lane.side; game.best = Math.max(game.best, Math.floor(distance / 10));
   }
 }
 
@@ -816,7 +828,9 @@ function explode(lane, o, gy) {
     const b = bossBox(lane.side, gy);
     if (cx > b.d0 - R && cx < b.d1 + R && cy > b.y0 - R && cy < b.y1 + R) hitBoss(lane, it, gy);
   }
-  if (player.invuln <= 0 && Math.hypot(player.off - cx, gy + r.y - 35 - cy) < R * 0.75) hurtPlayer({}, gy);
+  // the closer to the blast, the more it hurts (up to the grenade's full damage)
+  const near = Math.hypot(player.off - cx, gy + r.y - 35 - cy);
+  if (r.invuln <= 0 && near < R * 0.75) hurtRunner(lane, Math.round(it.min * (1 - near / R)), gy);
   lane.obs.push({ type: 'boom', d: cx, y: o.y, r: R, t: 0, dead: false, hit: false });
   burst(cx, cy, 30, 1.4, lane.side, '#ffb347');
   burst(cx, cy, 14, 1.0, lane.side, '#ffffff');
@@ -883,7 +897,7 @@ function setupArena() {
       ({ type: 'platform', d: half * p, len, h: h0 + H, h0, delay: 0.1 + i * 0.16, y: 0, t: 0, dead: false }))];
     Object.assign(lane.body, { sliding: false, deflectT: 0 });
   }
-  player.invuln = 0;
+  lanes.forEach(l => { l.body.invuln = 0; });
 }
 
 // --- Where a swing will land. Zones are in lane coordinates with heights above the floor. ---
@@ -1093,9 +1107,9 @@ function bossVsRunner(lane, r, pb, hitting, gy) {
   for (const o of lane.obs) if (o.type === 'grenade' && !o.dead && boss.alive && overlaps(obstacleBox(o, gy), bb)) explode(lane, o, gy);
   // a swing only hurts in its marked zone, on the side it's aimed at
   const z = b.zones[lane.side];
-  if (z && SWINGS.includes(b.state) && b.swingSide === lane.side && !b.swingHit[lane.side] && player.invuln <= 0 &&
+  if (z && SWINGS.includes(b.state) && b.swingSide === lane.side && !b.swingHit[lane.side] && r.invuln <= 0 &&
       overlaps(zoneBox(z, gy), pb)) {
-    b.swingHit[lane.side] = true; hurtPlayer({}, gy); shake = Math.max(shake, 10);
+    b.swingHit[lane.side] = true; hurtRunner(lane, b.state === 'rageSwing' ? DAMAGE.rage : DAMAGE.club, gy); shake = Math.max(shake, 10);
   }
 }
 
@@ -1648,7 +1662,7 @@ function drawLane(lane, sky) {
   // Gronk marks where his club is about to land, so you know whether to go up or down.
   if (boss && boss.zones[lane.side]) drawDangerZone(boss.zones[lane.side], gy);
 
-  const blink = player.invuln > 0 && Math.floor(time * 20) % 2 === 0;
+  const blink = lane.body.invuln > 0 && Math.floor(time * 20) % 2 === 0;
   if (!blink) {
     ctx.shadowColor = sky.accent; ctx.shadowBlur = 14;
     const r = lane.body;
@@ -1859,7 +1873,7 @@ function drawItemIcon(key, x, y, s = 1, ink = '#f4efe6') {
 
 // One inventory slot at (x, y), s px square. `keyLabel` marks a hotbar slot (with its hotkey);
 // an empty hotbar slot shows a faint fist, since that's what you attack with from it.
-function drawSlot(x, y, s, stack, { selected = false, accent = '#ffffff', keyLabel = null, lifted = false, count = true } = {}) {
+function drawSlot(x, y, s, stack, { selected = false, accent = '#ffffff', keyLabel = null, lifted = false, count = true, cd = null } = {}) {
   ctx.save();
   ctx.fillStyle = selected ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.07)';
   ctx.beginPath(); ctx.roundRect(x, y, s, s, s * 0.16); ctx.fill();
@@ -1875,6 +1889,13 @@ function drawSlot(x, y, s, stack, { selected = false, accent = '#ffffff', keyLab
     }
   } else if (keyLabel && !lifted) {
     ctx.globalAlpha = 0.22; drawItemIcon('fists', x + s / 2, y + s / 2, s / 58); ctx.globalAlpha = 1;
+  }
+  if (stack && !lifted && cd) {  // on cooldown: a dark shade that drains from the top, with the seconds left
+    ctx.save(); ctx.beginPath(); ctx.roundRect(x, y, s, s, s * 0.16); ctx.clip();
+    ctx.fillStyle = 'rgba(8,6,12,0.65)'; ctx.fillRect(x, y + s * (1 - cd.frac), s, s * cd.frac);
+    ctx.restore();
+    ctx.font = `800 ${Math.round(s * 0.3)}px system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
+    ctx.fillText(Math.ceil(cd.left), x + s / 2, y + s / 2 + s * 0.1);
   }
   if (keyLabel) {
     ctx.font = `700 ${Math.round(s * 0.22)}px system-ui, sans-serif`; ctx.textAlign = 'left';
@@ -1894,20 +1915,43 @@ function hotbarAt(px, py) {
   for (const side of [-1, 1]) for (let i = 0; i < HOTBAR; i++) if (inRect(px, py, hotbarRect(side, i))) return { side, i };
   return null;
 }
+// How far through its cooldown a runner's item is, for drawSlot (null when it's ready).
+function cooldownOf(r, stack) {
+  const left = stack && r.cds[stack.key];
+  return left > 0 ? { left, frac: left / ITEMS[stack.key].cooldown } : null;
+}
+// A runner's health bar: red for what's left, a pale chunk for what was just lost, flashing when low.
+function drawHpBar(r, x, y, w, h) {
+  ctx.save();
+  ctx.fillStyle = INK; ctx.beginPath(); ctx.roundRect(x - 2, y - 2, w + 4, h + 4, 5); ctx.fill();
+  ctx.fillStyle = '#3a1016'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = '#ffd6d6'; ctx.fillRect(x, y, w * r.hpLag / MAX_HP, h);
+  const low = r.hp <= MAX_HP * 0.3;
+  ctx.fillStyle = low && Math.floor(time * 6) % 2 ? '#ff8a8a' : r.hp > MAX_HP * 0.5 ? '#5bd16a' : low ? '#ff3b3b' : '#ffb347';
+  ctx.fillRect(x, y, w * r.hp / MAX_HP, h);
+  ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(x, y, w * r.hp / MAX_HP, Math.max(2, h * 0.3));
+  ctx.font = `800 ${Math.round(h * 0.85)}px system-ui, sans-serif`; ctx.textAlign = 'center';
+  ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.lineJoin = 'round'; ctx.fillStyle = '#fff';
+  const t = `${Math.ceil(r.hp)} / ${MAX_HP}`;
+  ctx.strokeText(t, x + w / 2, y + h * 0.82); ctx.fillText(t, x + w / 2, y + h * 0.82);
+  ctx.restore();
+}
 function drawHotbars() {
   for (const lane of lanes) {
     const r = lane.body, accent = SKIES[lane.side].accent;
     for (let i = 0; i < HOTBAR; i++) {
       const b = hotbarRect(lane.side, i);
-      drawSlot(b.x, b.y, b.s, r.inv[i], { selected: i === r.slot, accent, keyLabel: hotkey(lane.side, i) });
+      drawSlot(b.x, b.y, b.s, r.inv[i], { selected: i === r.slot, accent, keyLabel: hotkey(lane.side, i), cd: cooldownOf(r, r.inv[i]) });
     }
+    const b0 = hotbarRect(lane.side, 0), b2 = hotbarRect(lane.side, HOTBAR - 1);
+    drawHpBar(r, b0.x, b0.y - 26, b2.x + b2.s - b0.x, 16);
     // the name of what you just switched to pops up over the hotbar for a moment
     const since = time - r.switchAt;
     if (since < 1.4) {
       const b = hotbarRect(lane.side, 1), st = r.inv[r.slot], it = st ? ITEMS[st.key] : PUNCH;
       ctx.save(); ctx.globalAlpha = Math.min(1, (1.4 - since) * 3);
       ctx.font = '700 17px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.lineWidth = 4; ctx.strokeStyle = INK; ctx.lineJoin = 'round';
-      ctx.strokeText(it.name, b.x + b.s / 2, b.y - 12); ctx.fillStyle = RARITY[it.rarity]; ctx.fillText(it.name, b.x + b.s / 2, b.y - 12);
+      ctx.strokeText(it.name, b.x + b.s / 2, b.y - 40); ctx.fillStyle = RARITY[it.rarity]; ctx.fillText(it.name, b.x + b.s / 2, b.y - 40);
       ctx.restore();
     }
   }
@@ -1916,11 +1960,11 @@ function drawHotbars() {
 // The pause screen: each runner's inventory in its own half of the screen, hotbar on top, bag below.
 function menuLayout() {
   // panels shrink to leave room for the shop column in the middle
-  const S = Math.round(Math.max(34, Math.min(64, (W / 2 - shopWidth() - 68) / (BAG_COLS * 1.12), (H - 280) / 5.4))), G = Math.round(S * 0.16);
+  const S = Math.round(Math.max(34, Math.min(64, (W / 2 - shopWidth() - 68) / (BAG_COLS * 1.12), (H - 300) / 5.4))), G = Math.round(S * 0.16);
   const rowW = n => n * S + (n - 1) * G, top = Math.max(90, H * 0.16);
   return [-1, 1].map(side => {
     const cx = W / 2 + side * (shopWidth() / 2 + 16 + (rowW(BAG_COLS) + 44) / 2), slots = [];
-    const hotY = top + 92, bagY = hotY + S + 44;
+    const hotY = top + 112, bagY = hotY + S + 44;
     for (let i = 0; i < HOTBAR; i++) slots.push({ side, i, x: cx - rowW(HOTBAR) / 2 + i * (S + G), y: hotY, s: S });
     for (let j = 0; j < BAG; j++)
       slots.push({ side, i: HOTBAR + j, x: cx - rowW(BAG_COLS) / 2 + (j % BAG_COLS) * (S + G), y: bagY + Math.floor(j / BAG_COLS) * (S + G), s: S });
@@ -2030,11 +2074,13 @@ function drawInventory() {
     ctx.fillStyle = RARITY[it.rarity]; ctx.fillText(it.name, hx + lw, p.top + 60);
     ctx.font = '500 14px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fillText('Holding: ', hx, p.top + 60);
     ctx.font = '700 12px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    drawHpBar(r, p.slots[HOTBAR].x, p.top + 70, p.box.w - 44, 12);
+    ctx.font = '700 12px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.textAlign = 'left';
     ctx.fillText('HOTBAR', p.slots[0].x, p.hotY - 10);
     ctx.fillText('BAG', p.slots[HOTBAR].x, p.bagY - 10);
     for (const s of p.slots) {
       const lifted = menu.drag && menu.drag.side === p.side && menu.drag.i === s.i;
-      drawSlot(s.x, s.y, s.s, r.inv[s.i], { selected: s.i === r.slot, accent, keyLabel: s.i < HOTBAR ? hotkey(p.side, s.i) : null, lifted });
+      drawSlot(s.x, s.y, s.s, r.inv[s.i], { selected: s.i === r.slot, accent, keyLabel: s.i < HOTBAR ? hotkey(p.side, s.i) : null, lifted, cd: cooldownOf(r, r.inv[s.i]) });
     }
   }
   drawShop();
@@ -2075,7 +2121,8 @@ function drawTooltip(it, stack, price = 0) {
     if (it.beam) rows.push(['Pierces everything in its path', '600 15px', '#fff']);
     if (it.auto) rows.push(['Hold the mouse to keep firing', '600 15px', '#fff']);
   }
-  if (it.heal) rows.push(['', '6px'], [`Restores ${it.heal} life when used`, '600 15px', '#fff']);
+  if (it.heal) rows.push(['', '6px'], [`Restores ${it.heal} HP when used`, '600 15px', '#fff']);
+  if (it.cooldown) rows.push([`${it.cooldown}s cooldown`, '600 15px', '#fff']);
   if (price) rows.push(['', '6px'], [`Price: ${price} gold`, '700 15px', wallet >= price ? '#ffd23f' : '#ff6b6b']);
   if (stack && maxStack(stack.key) > 1) rows.push([`Stack: ${stack.n} / ${maxStack(stack.key)}`, '600 13px', 'rgba(255,255,255,0.5)']);
   if (it.desc) {
@@ -2138,24 +2185,19 @@ function draw() {
     ctx.lineWidth = 5; ctx.strokeStyle = INK; ctx.lineJoin = 'round';
     const label = p.crit ? p.text + '!' : String(p.text);
     ctx.strokeText(label, 0, 0);
-    ctx.fillStyle = p.crit ? '#ffd23f' : '#fff'; ctx.fillText(label, 0, 0);
+    ctx.fillStyle = p.hurt ? '#ff5a5a' : p.heal ? '#5bd16a' : p.crit ? '#ffd23f' : '#fff'; ctx.fillText(label, 0, 0);
     ctx.restore();
   }
   ctx.fillStyle = '#fff';
   if (player && !game.paused) {  // (the inventory screen covers the HUD, so it's skipped while paused)
     ctx.font = '700 28px system-ui, sans-serif';
     if (!boss || boss.state === 'approach' || boss.state === 'exit') ctx.fillText(Math.floor(distance / 10) + ' m', W / 2, 46);
-    for (let i = 0; i < 3; i++) {
-      ctx.fillStyle = i < player.lives ? '#fff' : 'rgba(255,255,255,0.2)';
-      ctx.beginPath(); ctx.arc(W / 2 - 24 + i * 24, 72, 7, 0, Math.PI * 2); ctx.fill();
-    }
     // wallet (persists between runs; the shop will spend it later)
     ctx.font = '700 20px system-ui, sans-serif';
     const label = String(wallet), lw = ctx.measureText(label).width;
     const cx = W / 2 - (lw + 22) / 2;
-    ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(cx + 8, 101, 10, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#ffd23f'; ctx.beginPath(); ctx.arc(cx + 8, 101, 7.5, 0, Math.PI * 2); ctx.fill();
-    ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.fillText(label, cx + 22, 108); ctx.textAlign = 'center';
+    drawCoin(cx + 8, 74);
+    ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.fillText(label, cx + 22, 81); ctx.textAlign = 'center';
 
     // pickup labels float up over whichever runner grabbed the item, colored by rarity
     const gy = groundY(), stack = { '-1': 0, '1': 0 };
@@ -2182,7 +2224,10 @@ function draw() {
     ctx.font = '800 64px system-ui, sans-serif';
     ctx.fillText(game.state === 'over' ? 'BROKEN MIRROR' : 'MIRROR RUN', W / 2, H * 0.38);
     ctx.font = '500 20px system-ui, sans-serif';
-    if (game.state === 'over') ctx.fillText(`${Math.floor(distance / 10)} m   ·   +${player.coins} coins   ·   best ${game.best} m`, W / 2, H * 0.38 + 44);
+    if (game.state === 'over') {
+      ctx.fillStyle = SKIES[game.fallen].accent; ctx.fillText(`The ${RUNNER_NAMES[game.fallen]} fell`, W / 2, H * 0.38 + 44); ctx.fillStyle = '#fff';
+      ctx.fillText(`${Math.floor(distance / 10)} m   ·   +${player.coins} coins   ·   best ${game.best} m`, W / 2, H * 0.38 + 74);
+    }
     ctx.globalAlpha = 0.85;
     ctx.fillText('W / Space  jump    S  slide / fast-fall    A / D  move    Click  attack', W / 2, H * 0.55);
     ctx.fillText('1 2 3  left hotbar    4 5 6  right hotbar    Esc  pause / inventory', W / 2, H * 0.55 + 32);
