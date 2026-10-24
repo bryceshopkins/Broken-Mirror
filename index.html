@@ -112,7 +112,7 @@ const ENEMY_HP = 12;
 //   range        how far in front of the runner a melee hit reaches (px)
 //   swing        how long the attack animation lasts (s), and when in it the hit is live
 //                (as fractions of that time)
-const ATTACK_SPEED = { extreme: 12, fast: 5, medium: 3.3, slow: 1.4 };  // attacks per second
+const ATTACK_SPEED = { extreme: 16, fast: 5, medium: 3.3, slow: 1.4 };  // attacks per second
 const ATTACK_BUFFER = 0.2;  // s a click is remembered while the weapon is still recovering
 const PUNCH = { name: 'Fists', rarity: 'common', melee: true, anim: 'punch', attackSpeed: 'medium', min: 12, max: 16,
                 critChance: 0.2, critMult: 2, range: 80, swing: { dur: 0.24, hit: [0.12, 0.88] },
@@ -122,7 +122,7 @@ const PUNCH = { name: 'Fists', rarity: 'common', melee: true, anim: 'punch', att
 // armed. Rarity sets the color of the item's name. `desc` is the tooltip flavor text in the inventory.
 //   melee       swung when it's the selected hotbar item (`anim` picks the animation)
 //   throwSpeed  thrown, one per attack, used up from the stack (`lob`: falls and bounces, like the grenade)
-//   beam        fires a piercing laser at the cursor; `auto` keeps firing while the mouse is held
+//   beam        sprays piercing laser bolts at the cursor; `auto` keeps firing while the mouse is held
 //   aoe         explodes, hitting everything within this radius (you too, if you're close)
 //   heal        HP restored when used from the hotbar (`cooldown`: seconds before that runner can use another)
 //   stack       how many fit in one slot (default 1)
@@ -553,7 +553,7 @@ function update(dt) {
         burst(hand.d, gy + hand.y, 8, 0.5, lane.side);  // release flash
       } else if (it && it.beam) {
         r.attack = st.key;
-        fireBeam(lane, hand, dx / len, dy / len, it, gy);
+        fireBolt(lane, r, st.key, Math.atan2(dy, dx));
       } else r.attack = it && it.melee ? st.key : 'punch';
       r.swingT = 0; r.hits.clear(); r.attackCd = 1 / ATTACK_SPEED[attackOf(r).attackSpeed];
     }
@@ -564,7 +564,8 @@ function update(dt) {
     lane.hills.forEach(h => { h.x -= speed * 0.25 * dt; if (h.x < -300) h.x += 8 * 220; });
     for (const o of lane.obs) {
       if (o.type === 'slash') { o.t += dt; if (o.t > 0.35) o.dead = true; continue; }
-      if (o.type === 'beam' || o.type === 'boom') { o.t += dt; o.d -= speed * dt; if (o.t > (o.type === 'beam' ? 0.09 : 0.4)) o.dead = true; continue; }
+      if (o.type === 'boom' || o.type === 'spark') { o.t += dt; o.d -= speed * dt; if (o.t > (o.type === 'boom' ? 0.4 : 0.12)) o.dead = true; continue; }
+      if (o.type === 'bolt') { updateBolt(lane, o, dt, gy); continue; }
       if (o.type === 'grenade') { updateGrenade(lane, o, dt, gy); continue; }
       if (o.type === 'wave') {  // boss slam shockwave: rolls toward you, then fizzles out
         o.d -= BOSS.waveSpeed * dt; o.t += dt;
@@ -597,7 +598,7 @@ function update(dt) {
     const bodyH = r.sliding ? 34 : 70;
     const pb = { d0: player.off - 11, d1: player.off + 11, y0: gy + r.y - bodyH, y1: gy + r.y };
     for (const o of lane.obs) {
-      if (o.dead || o.type === 'platform' || o.type === 'tunnel' || o.type === 'slash' || o.type === 'beam' || o.type === 'boom') continue;
+      if (o.dead || o.type === 'platform' || o.type === 'tunnel' || o.type === 'slash' || o.type === 'bolt' || o.type === 'boom' || o.type === 'spark') continue;
       if (o.type === 'grenade') {  // goes off on contact with an enemy
         if (lane.obs.some(e => e.type === 'enemy' && !e.dead && overlaps(obstacleBox(o, gy), obstacleBox(e, gy)))) explode(lane, o, gy);
         continue;
@@ -793,33 +794,70 @@ function hitEnemy(o, lane, gy, weapon = PUNCH) {
   }
 }
 
-// Does the segment (x0, y0)-(x1, y1) pass through box b? (Liang-Barsky clipping)
-function segHitsBox(x0, y0, x1, y1, b) {
+// Where (0-1 along it) the segment (x0, y0)-(x1, y1) enters box b, or -1 if it misses. (Liang-Barsky clipping)
+function segEnter(x0, y0, x1, y1, b) {
   const dx = x1 - x0, dy = y1 - y0;
   let t0 = 0, t1 = 1;
   for (const [p, q] of [[-dx, x0 - b.d0], [dx, b.d1 - x0], [-dy, y0 - b.y0], [dy, b.y1 - y0]]) {
-    if (p === 0) { if (q < 0) return false; continue; }
+    if (p === 0) { if (q < 0) return -1; continue; }
     const t = q / p;
-    if (p < 0) { if (t > t1) return false; t0 = Math.max(t0, t); }
-    else { if (t < t0) return false; t1 = Math.min(t1, t); }
+    if (p < 0) { if (t > t1) return -1; t0 = Math.max(t0, t); }
+    else { if (t < t0) return -1; t1 = Math.min(t1, t); }
   }
-  return true;
+  return t0;
 }
+const segHitsBox = (x0, y0, x1, y1, b) => segEnter(x0, y0, x1, y1, b) >= 0;
 const bossBox = (side, gy) => { const d = bossD(side); return { d0: d - 36, d1: d + 36, y0: gy + boss.y - 175 * BOSS.scale, y1: gy + boss.y }; };
 
-// Laser: an instant beam from the hand along (ux, uy) that pierces every enemy (and enemy star) in its path.
-function fireBeam(lane, hand, ux, uy, it, gy) {
-  const L = 1600, x0 = hand.d, y0 = gy + hand.y, x1 = x0 + ux * L, y1 = y0 + uy * L;
-  for (const o of lane.obs) {
-    if (o.dead || o.d > W / 2 + 10) continue;  // only what's on screen
-    if (o.type === 'enemy' && segHitsBox(x0, y0, x1, y1, obstacleBox(o, gy))) hitEnemy(o, lane, gy, it);
-    else if (o.type === 'star' && !o.friendly && segHitsBox(x0, y0, x1, y1, obstacleBox(o, gy))) {
-      o.dead = true; burst(o.d, gy + o.y, 8, 0.5, lane.side, '#ffffff');
-    }
+// Laser gun: each shot is a fast bolt sprayed out of the muzzle with a bit of random spread. A bolt
+// flies straight through floating platforms (and tunnel roofs), but stops at the first other thing it
+// meets: an enemy, an enemy star, the boss, a block, ledge, spikes, an overhead wall or the ground.
+// The muzzle position and aim come from where the gun was drawn last frame (see drawLane), so the
+// bolts leave the barrel itself.
+const BOLT = { speed: 2300, spread: 0.09, len: 30 };
+function fireBolt(lane, r, key, fallbackA) {
+  const m = r.muzzle, a = (m ? m.a : fallbackA) + (Math.random() - 0.5) * 2 * BOLT.spread;
+  const d = m ? player.off + m.dd : player.off + 18, y = m ? r.y + m.dy : r.y - STAR.y;
+  const v = BOLT.speed * (0.9 + Math.random() * 0.2);
+  lane.obs.push({ type: 'bolt', item: key, d, y, vd: Math.cos(a) * v, vy: Math.sin(a) * v, t: 0, hits: new Set(), dead: false, hit: false });
+  burst(d, groundY() + y, 3, 0.3, lane.side, '#ff2b6a');
+}
+const BOLT_STOPS = ['enemy', 'star', 'block', 'ledge', 'spike', 'bar'];
+function updateBolt(lane, o, dt, gy) {
+  const x0 = o.d, y0 = gy + o.y;
+  o.d += o.vd * dt; o.y += o.vy * dt; o.t += dt;
+  const x1 = o.d, y1 = gy + o.y;
+  // Test the whole stretch it covered this frame (so a fast bolt can't skip over anything) and
+  // take whatever it reached first.
+  let first = 1.01, target = null;
+  for (const e of lane.obs) {
+    if (e.dead || !BOLT_STOPS.includes(e.type) || (e.type === 'star' && e.friendly) || e.d > W / 2 + 10) continue;
+    const t = segEnter(x0, y0, x1, y1, obstacleBox(e, gy));
+    if (t >= 0 && t < first) { first = t; target = e; }
   }
-  if (boss && boss.alive && segHitsBox(x0, y0, x1, y1, bossBox(lane.side, gy))) hitBoss(lane, it, gy);
-  lane.obs.push({ type: 'beam', d: x0, y: hand.y, dx: ux * L, dy: uy * L, t: 0, dead: false, hit: false });
-  burst(x0, y0, 5, 0.4, lane.side, '#ff2b6a');
+  if (boss && boss.alive) {
+    const t = segEnter(x0, y0, x1, y1, bossBox(lane.side, gy));
+    if (t >= 0 && t < first) { first = t; target = 'boss'; }
+  }
+  // the ground (or the floor of a tunnel), checked at a few points along the way
+  for (let k = 1; k <= 4; k++) {
+    const t = k / 4;
+    if (t >= first) break;
+    if (o.y - (1 - t) * o.vy * dt >= floorAt(lane, x0 + (x1 - x0) * t)) { first = t; target = 'ground'; break; }
+  }
+  if (target) {
+    const hx = x0 + (x1 - x0) * first, hy = y0 + (y1 - y0) * first, it = ITEMS[o.item];
+    if (target === 'boss') hitBoss(lane, it, gy);
+    else if (target !== 'ground' && target.type === 'enemy') hitEnemy(target, lane, gy, it);
+    else if (target !== 'ground' && target.type === 'star') target.dead = true;
+    o.dead = true;
+    // sparks: a white-hot splash and some pink embers, with a quick flash where it struck
+    burst(hx, hy, 9, 0.7, lane.side, '#ffffff');
+    burst(hx, hy, 6, 0.5, lane.side, '#ff2b6a');
+    lane.obs.push({ type: 'spark', d: hx, y: hy - gy, a: Math.atan2(o.vy, o.vd), t: 0, dead: false, hit: false });
+    return;
+  }
+  if (x1 > W / 2 + 60 || x1 < -60 || y1 < -60 || y1 > H + 60) o.dead = true;
 }
 
 // Grenades fly in an arc and bounce off whatever floor is under them; the second bounce sets them off.
@@ -1216,7 +1254,10 @@ function reachFor(sx, sy, tx, ty, len = 14) {
 }
 
 function drawStick(x, gy, pose) {
-  const { phase, mode, punch = 0, club = null, lean = club ? club.lean : 0.18, streak = true, windup = false, throwing = false, deflect = -1 } = pose;
+  // `club` (or `grip`, for a gun) puts both hands on a held weapon: `reach` is where the arms point,
+  // `a` the weapon's angle, `len` how far out the front hand is and `hold` how far up it the other is
+  const { phase, mode, punch = 0, club = null, grip = null, streak = true, windup = false, throwing = false, deflect = -1 } = pose;
+  const two = club || grip, lean = pose.lean !== undefined ? pose.lean : two ? two.lean : 0.18;
   ctx.strokeStyle = INK; ctx.fillStyle = INK; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = 6;
   let hipY = gy - 34, torsoA = lean, legs, arms;
   if (mode === 'slide') {
@@ -1252,13 +1293,14 @@ function drawStick(x, gy, pose) {
   seg(x, hipY, nx, ny);
   const shX = x + (nx - x) * 0.85, shY = hipY + (ny - hipY) * 0.85;
   let hand = null;
-  if (club) {  // swinging: both hands on the handle, one a little further up it; carrying: just the front one
-    const gx = shX + Math.sin(club.reach) * 23, gyy = shY + Math.cos(club.reach) * 23;
+  const reachLen = two && two.len || 23, hold = two && two.hold || 7;
+  if (two) {  // swinging: both hands on the handle, one a little further up it; carrying: just the front one
+    const gx = shX + Math.sin(two.reach) * reachLen, gyy = shY + Math.cos(two.reach) * reachLen;
     arms = [reachFor(shX, shY, gx, gyy),
-            club.carry ? arms[1] : reachFor(shX, shY, gx + Math.cos(club.a) * 7, gyy + Math.sin(club.a) * 7)];
+            two.carry ? arms[1] : reachFor(shX, shY, gx + Math.cos(two.a) * hold, gyy + Math.sin(two.a) * hold)];
   }
   for (const [a1, a2] of arms) { const e = limb(shX, shY, a1, 14); const h = limb(e[0], e[1], a2, 14); hand = hand || h; }
-  if (club) hand = [shX + Math.sin(club.reach) * 23, shY + Math.cos(club.reach) * 23, shX, shY];
+  if (two) hand = [shX + Math.sin(two.reach) * reachLen, shY + Math.cos(two.reach) * reachLen, shX, shY];
   ctx.beginPath(); ctx.arc(nx + Math.sin(Math.PI - torsoA) * 10, ny + Math.cos(Math.PI - torsoA) * 10, 10, 0, Math.PI * 2); ctx.fill();
   if (punch > 0 && streak) { // fist streak
     ctx.globalAlpha = Math.min(1, punch * 6) * 0.6; ctx.lineWidth = 3;
@@ -1320,6 +1362,30 @@ function drawShuriken(x, y, rot, tint, glow = false, scale = 1, ink = INK) {
   ctx.shadowBlur = 0;
   ctx.fillStyle = tint; ctx.beginPath(); ctx.arc(0, 0, 2.5, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
+}
+
+// The Obliterator: a hulking triple-barrel laser cannon. Drawn from its grip at (x, y), pointing along `a`;
+// `flash` (0-1) adds a muzzle flash. Returns where the muzzle ended up.
+function drawObliterator(x, y, a, s, ink = INK, flash = 0) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a); ctx.scale(s, s);
+  ctx.fillStyle = ink;
+  ctx.beginPath(); ctx.moveTo(-34, -10); ctx.lineTo(-14, -14); ctx.lineTo(-14, -2); ctx.lineTo(-30, 3); ctx.closePath(); ctx.fill();  // stock
+  ctx.beginPath(); ctx.roundRect(-14, -17, 44, 16, 4); ctx.fill();                                   // body
+  ctx.fillRect(-4, -23, 18, 6); ctx.fillRect(2, -26, 6, 4);                                          // sight
+  ctx.beginPath(); ctx.moveTo(-6, -2); ctx.lineTo(2, -2); ctx.lineTo(-1, 10); ctx.lineTo(-9, 10); ctx.closePath(); ctx.fill();  // grip
+  ctx.fillRect(10, -2, 6, 7);                                                                         // fore grip
+  ctx.beginPath(); ctx.roundRect(29, -16, 9, 14, 2); ctx.fill();                                     // barrel housing
+  for (const by of [-15, -10.5, -6]) ctx.fillRect(37, by, 26, 3.5);                                  // three barrels
+  ctx.fillStyle = '#ff2b6a'; ctx.shadowColor = '#ff2b6a'; ctx.shadowBlur = 10;
+  ctx.fillRect(-10, -11, 36, 3); ctx.fillRect(31, -12, 5, 6);                                        // glowing core
+  for (const by of [-15, -10.5, -6]) ctx.fillRect(61, by, 3, 3.5);                                   // hot barrel tips
+  if (flash > 0) {
+    ctx.globalAlpha = flash; ctx.fillStyle = '#ffffff'; ctx.shadowBlur = 20;
+    ctx.beginPath(); ctx.moveTo(64, -18); ctx.lineTo(84, -9); ctx.lineTo(64, 0); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#ff2b6a'; ctx.beginPath(); ctx.arc(66, -9, 9, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+  return [x + (Math.cos(a) * 64 - Math.sin(a) * -9) * s, y + (Math.sin(a) * 64 + Math.cos(a) * -9) * s];
 }
 
 // Spiked club: handle out along angle `a` (0 = forward, negative = up), heavy studded head at the end.
@@ -1668,12 +1734,23 @@ function drawLane(lane, sky) {
         ctx.fillStyle = '#ff3b3b'; ctx.beginPath(); ctx.arc(o.d, gy + o.y + 2, 3, 0, Math.PI * 2); ctx.fill();
       }
     }
-    else if (o.type === 'beam') {  // laser: a hot pink glow with a white core, gone in a blink
-      const k = 1 - o.t / 0.09, x0 = o.d, y0 = gy + o.y;
-      ctx.save(); ctx.lineCap = 'round'; ctx.globalAlpha = Math.max(0, k);
-      ctx.shadowColor = '#ff2b6a'; ctx.shadowBlur = 18;
-      ctx.strokeStyle = '#ff2b6a'; ctx.lineWidth = 9 * k + 2; seg(x0, y0, x0 + o.dx, y0 + o.dy);
-      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3 * k + 1; seg(x0, y0, x0 + o.dx, y0 + o.dy);
+    else if (o.type === 'bolt') {  // laser bolt: a short hot-pink streak with a white core
+      const v = Math.hypot(o.vd, o.vy), ux = o.vd / v, uy = o.vy / v, x = o.d, y = gy + o.y;
+      const L = BOLT.len * Math.min(1, o.t * 40 + 0.3);  // stretches out as it leaves the barrel
+      ctx.save(); ctx.lineCap = 'round'; ctx.shadowColor = '#ff2b6a'; ctx.shadowBlur = 12;
+      ctx.strokeStyle = '#ff2b6a'; ctx.lineWidth = 6; seg(x, y, x - ux * L, y - uy * L);
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; seg(x, y, x - ux * L * 0.75, y - uy * L * 0.75);
+      ctx.restore();
+    }
+    else if (o.type === 'spark') {  // impact flash: a bright star of short rays splashing back off the surface
+      const k = o.t / 0.12, x = o.d, y = gy + o.y;
+      ctx.save(); ctx.globalAlpha = 1 - k; ctx.lineCap = 'round'; ctx.shadowColor = '#ff2b6a'; ctx.shadowBlur = 14;
+      ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(x, y, 7 * (1 - k) + 2, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#ffd6e4'; ctx.lineWidth = 2;
+      for (let i = 0; i < 6; i++) {
+        const ra = o.a + Math.PI + (i - 2.5) * 0.45, r0 = 4 + k * 8, r1 = 12 + k * 18;
+        seg(x + Math.cos(ra) * r0, y + Math.sin(ra) * r0, x + Math.cos(ra) * r1, y + Math.sin(ra) * r1);
+      }
       ctx.restore();
     }
     else if (o.type === 'boom') {  // explosion: a fireball that swells and fades, with a shock ring
@@ -1699,16 +1776,29 @@ function drawLane(lane, sky) {
     const mode = r.sliding ? 'slide' : !r.grounded ? 'jump' : idle ? 'stand' : 'run';
     const swinging = swingK(r) < 1;
     const throwing = !!attackOf(r).throwSpeed && swinging;
-    const firing = !!attackOf(r).beam && swinging;  // arm thrust out toward the target while the laser fires
+    const firing = !!attackOf(r).beam && swinging;
     const deflect = r.deflectT > 0 ? 1 - r.deflectT / DEFLECT_T : -1;
     // whatever's selected on the hotbar is held in the front hand, so you can tell at a glance who's armed;
     // the club stays put on the shoulder while running, and only leaves it for a swing
     const held = heldKey(r), free = !throwing && deflect < 0;
     const club = r.attack === 'club' && swinging ? clubPose(swingK(r))
                : held === 'club' && free ? { reach: CLUB_REST[0], a: CLUB_REST[1], lean: CLUB_REST[2], carry: true } : null;
+    // a held gun is shouldered in both hands and follows the cursor (mirrored, like all aiming),
+    // kicking back a little with each shot
+    let grip = null, aimA = 0;
+    if (!club && free && ITEMS[held] && ITEMS[held].beam) {
+      const shX = player.off + 6, shY = gy + r.y - 58;
+      aimA = Math.max(-1.25, Math.min(1.0, Math.atan2(mouse.y - shY, Math.min(mouse.x, W - mouse.x) - shX)));
+      const kick = firing ? (1 - swingK(r)) * 5 : 0;
+      grip = { reach: Math.PI / 2 - aimA, a: aimA, lean: 0.08, len: 15 - kick, hold: 13 };
+    }
     const hand = drawStick(player.off, gy + r.y, {
-      phase: player.phase, mode, throwing, deflect, club, streak: !firing,
-      punch: (attackOf(r).anim === 'punch' || firing) && swinging && deflect < 0 ? attackOf(r).swing.dur - r.swingT : 0 });
+      phase: player.phase, mode, throwing, deflect, club, grip,
+      punch: attackOf(r).anim === 'punch' && swinging && deflect < 0 ? attackOf(r).swing.dur - r.swingT : 0 });
+    if (grip && hand) {
+      const m = drawObliterator(hand[0], hand[1], aimA, 0.8, INK, firing ? 1 - swingK(r) : 0);
+      r.muzzle = { dd: m[0] - player.off, dy: m[1] - (gy + r.y), a: aimA };  // where the next bolt leaves from
+    } else r.muzzle = null;
     if (hand && (club || held === 'club')) {
       // the club rests up over the shoulder; swinging, it's held in both hands (see clubPose)
       const a = club ? club.a : -2.0;
@@ -1721,7 +1811,7 @@ function drawLane(lane, sky) {
       drawClub(hand[0], hand[1], a, 0.85);
     }
     else if (hand && free && held === 'shuriken') drawShuriken(hand[0], hand[1], time * 3, sky.accent, false, 0.75);
-    else if (hand && free && held) drawItemIcon(held, hand[0], hand[1], 0.5, INK);
+    else if (hand && free && held && !grip) drawItemIcon(held, hand[0], hand[1], 0.5, INK);
     if (deflect >= 0) {  // the swat leaves a bright crescent in front of the runner
       const cx = player.off + 8, cy = gy + r.y - STAR.y, sweep = Math.min(1, deflect * 2.2);
       ctx.save(); ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 12; ctx.lineCap = 'round';
@@ -1853,6 +1943,7 @@ function drawBossUI() {
 // An item's icon, centered on (x, y), about 40px across at s = 1. Light by default, for the dark slots.
 function drawItemIcon(key, x, y, s = 1, ink = '#f4efe6') {
   if (key === 'shuriken') return drawShuriken(x, y, 0.3, ink === INK ? '#ffffff' : INK, false, 1.3 * s, ink);
+  if (key === 'obliterator') { ctx.save(); drawObliterator(x - 14 * 0.42 * s, y + 6 * 0.42 * s, 0, 0.42 * s, ink); ctx.restore(); return; }
   if (key === 'club') { const a = -0.8; return drawClub(x - Math.cos(a) * 17 * s, y - Math.sin(a) * 17 * s, a, 0.62 * s, ink); }
   ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
   ctx.strokeStyle = ctx.fillStyle = ink; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
@@ -1886,12 +1977,6 @@ function drawItemIcon(key, x, y, s = 1, ink = '#f4efe6') {
     ctx.fillStyle = '#e8c9a8'; ctx.fillRect(-6, -7, 12, 14);       // the pad
     ctx.fillStyle = 'rgba(11,10,15,0.35)';
     for (const [px, py] of [[-14, -3], [-14, 3], [14, -3], [14, 3]]) { ctx.beginPath(); ctx.arc(px, py, 1.2, 0, Math.PI * 2); ctx.fill(); }
-  } else if (key === 'obliterator') {
-    ctx.beginPath(); ctx.roundRect(-18, -7, 28, 12, 4); ctx.fill();          // body
-    ctx.fillRect(9, -4, 13, 6);                                              // barrel
-    ctx.beginPath(); ctx.moveTo(-14, 4); ctx.lineTo(-6, 4); ctx.lineTo(-9, 16); ctx.lineTo(-16, 16); ctx.fill();  // grip
-    ctx.fillStyle = '#ff2b6a'; ctx.shadowColor = '#ff2b6a'; ctx.shadowBlur = 8;
-    ctx.fillRect(-14, -3, 20, 3); ctx.fillRect(20, -3, 4, 4);                // glowing coil and muzzle
   } else if (key === 'pebble') {
     ctx.beginPath(); ctx.moveTo(-14, 4); ctx.lineTo(-9, -8); ctx.lineTo(3, -12); ctx.lineTo(13, -5); ctx.lineTo(14, 6); ctx.lineTo(4, 11); ctx.lineTo(-9, 10);
     ctx.closePath(); ctx.fill();
@@ -2147,7 +2232,7 @@ function drawTooltip(it, stack, price = 0) {
               ...(it.critChance ? [[`${Math.round(it.critChance * 100)}% crit chance  ·  x${it.critMult} crit damage`, '600 15px', '#fff']] : []));
     if (it.range) rows.push([`${it.range} reach`, '600 15px', '#fff']);
     if (it.aoe) rows.push([`${it.aoe} blast radius (can hit you too)`, '600 15px', '#fff'], ['Explodes on the 2nd bounce or on contact', '600 15px', '#fff']);
-    if (it.beam) rows.push(['Pierces everything in its path', '600 15px', '#fff']);
+    if (it.beam) rows.push(['Sprays laser bolts (they fly through platforms)', '600 15px', '#fff']);
     if (it.auto) rows.push(['Hold the mouse to keep firing', '600 15px', '#fff']);
   }
   if (it.heal) rows.push(['', '6px'], [`Restores ${it.heal} HP when used`, '600 15px', '#fff']);
