@@ -44,6 +44,13 @@ window.addEventListener('keydown', e => {
     if (k === '3') lanes.forEach(l => spawnObstacle(l, 'thrower'));
     if (k === '4' && !boss) startBoss();
     if (k === '5') lanes.forEach(l => { if (l.body.weapon !== 'club') { l.body.weapon = 'club'; addLabel(l, 'club'); } });
+    if (k === '6') lanes.forEach(l => spawnObstacle(l, 'brute'));
+    if (k === '7') lanes.forEach(l => { if (l.body.weapon !== 'axe') { l.body.weapon = 'axe'; addLabel(l, 'axe'); } });
+    if (k === '8' && !game.bossDefeated) {  // skip straight to the post-Gronk run (brutes start showing up)
+      if (boss) { boss = null; lanes.forEach(l => { l.obs = l.obs.filter(o => o.type === 'coin' || o.type === 'item'); }); }
+      game.bossDefeated = true; nextBeat = 300; nextPlatform = 800;
+      popups.push({ x: W / 2, y: 150, vx: 0, vy: -40, text: 'GRONK SKIPPED', word: true, side: -1, life: 1.4, age: 0 });
+    }
   }
   keys[k] = true;
   if (k === ' ') e.preventDefault();
@@ -86,6 +93,10 @@ const ITEMS = {
   // melee weapons replace that runner's fists for good
   club: { name: 'Spiked Club', rarity: 'rare', melee: true, attackSpeed: 'slow', min: 24, max: 32, critChance: 0.2, critMult: 2,
           range: 145, swing: { dur: 0.7, hit: [0.36, 1] } },  // live from the downswing on, so spam-clicking covers you
+  // block: chance it turns aside an enemy attack aimed at the runner holding it
+  axe: { name: 'Battle Axe', rarity: 'rare', melee: true, attackSpeed: 'slow', min: 25, max: 25, critChance: 0.2, critMult: 2,
+         range: 175, block: 0.1, swing: { dur: 0.7, hit: [0.36, 1] },
+         tooltip: 'One swing from this can split you in two... again... I guess.' },
 };
 const meleeOf = r => (r.weapon ? ITEMS[r.weapon] : PUNCH);
 const attackOf = r => (r.attack === 'throw' ? ITEMS.shuriken : r.attack === 'punch' ? PUNCH : ITEMS[r.attack]);
@@ -114,6 +125,21 @@ const BOSS = {
 let boss = null;
 const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5 };  // thrown at chest height
 const SHURIKEN_DROP_WEIGHTS = [25, 35, 25, 10, 5];  // index = how many a thrower drops (0-4)
+// Brutes show up once Gronk is down: slow and thick, swinging a huge axe in an overhead arc that
+// covers everything in front of them and above their head, so hopping over one gets you chopped.
+// Slide under the swing. Every hit knocks them back about as far as the ground scrolls before
+// your next attack, so you can keep laying into one instead of it walking through you.
+const BRUTE = {
+  chance: 0.25,                 // chance a beat is a brute beat (only one brute out at a time)
+  hp: 90, walk: 10,             // walk: px/s toward you, on top of the scrolling ground
+  reach: 140,                   // how far in front of him the axe reaches
+  zone: { lo: 40, hi: 240 },    // the height band the swing covers, above his feet (a slide gets under it)
+  windup: 0.6, swing: 0.16, recover: 0.45, cycle: 1.6,  // cycle: s from the start of one windup to the next
+  endA: 0.35,                   // axe angle where the swing ends (0 = straight forward, negative = up)
+  kbDecay: 8, kbExtra: 20,      // knockback eases out at this rate; kbExtra = px of ground gained per hit
+  axeDrop: 0.1,
+};
+const BRUTE_PATTERNS = [[['brute'], []], [['brute'], ['enemy', 200]], [['brute'], ['thrower', 150]], [['brute'], ['block', 120]]];
 
 function startGame() {
   player = { off: 120, coins: 0, invuln: 0, lives: 3, phase: 0 };
@@ -212,7 +238,7 @@ const nearEnemy = (lane, d, r) => lane.obs.some(o => o.type === 'enemy' && !o.de
 function spawnObstacle(lane, type, extra = 0, y = 0, placed = false) {
   const d = W / 2 + 60 + extra;
   let kind = null;
-  if (type === 'thrower') { type = 'enemy'; kind = 'thrower'; }
+  if (type === 'thrower' || type === 'brute') { kind = type; type = 'enemy'; }
   const isTerrain = type === 'ledge' || type === 'tunnel';
   let len = 0;
   if (isTerrain) {
@@ -226,8 +252,9 @@ function spawnObstacle(lane, type, extra = 0, y = 0, placed = false) {
   if (type === 'bar' && nearEnemy(lane, d, 120)) return null;
   const lift = placed || isTerrain ? 0 : ledgeLift(lane, d);
   const o = { type, d, y: y - lift, hit: false, dead: false, hp: ENEMY_HP, t: Math.random() * 6,
-              walks: type === 'enemy' && !placed && !kind };
+              walks: type === 'enemy' && !placed && (!kind || kind === 'brute') };
   if (kind === 'thrower') { o.kind = kind; o.throwCd = 0.05 + Math.random() * 0.25; o.windT = 0; o.relT = 0; }
+  if (kind === 'brute') Object.assign(o, { kind, hp: BRUTE.hp, maxHp: BRUTE.hp, kb: 0, cd: 0.3, windT: 0, swingT: 0, recT: 0, flashT: 0 });
   if (type === 'tunnel') { o.depth = TUNNEL.depth; o.gap = TUNNEL.gap; }
   if (isTerrain) { o.len = len; o.d += len / 2; settleOnto(lane, o); }
   lane.obs.push(o);
@@ -277,7 +304,10 @@ function spawnPlatform() {
   if (Math.random() < 0.5) spawnObstacle(lanes[1 - i], 'enemy', 250);  // keep the other side busy
 }
 function spawnBeat() {
-  const p = PATTERNS[Math.floor(Math.random() * Math.min(PATTERNS.length, 5 + distance / 2000))];
+  const bruteOut = lanes.some(l => l.obs.some(o => o.kind === 'brute' && !o.dead));
+  const p = game.bossDefeated && !bruteOut && Math.random() < BRUTE.chance
+    ? BRUTE_PATTERNS[Math.floor(Math.random() * BRUTE_PATTERNS.length)]
+    : PATTERNS[Math.floor(Math.random() * Math.min(PATTERNS.length, 5 + distance / 2000))];
   const flip = Math.random() < 0.5;
   [p[0], p[1]].forEach((o, i) => { if (o.length) spawnObstacle(lanes[flip ? 1 - i : i], o[0], o[1]); });
   if (Math.random() < 0.35) {  // a loose line of ground coins between beats
@@ -343,6 +373,7 @@ function obstacleBox(o, gy) {
   if (o.type === 'bar')   return { d0: o.d - 26, d1: o.d + 26, y0: 0, y1: gy + o.y - 46 };
   if (o.type === 'coin' || o.type === 'item') return { d0: o.d - 14, d1: o.d + 14, y0: gy + o.y - 14, y1: gy + o.y + 14 };
   if (o.type === 'star')  return { d0: o.d - 9, d1: o.d + 9, y0: gy + o.y - 9, y1: gy + o.y + 9 };
+  if (o.kind === 'brute') return { d0: o.d - 24, d1: o.d + 24, y0: gy + o.y - 112, y1: gy + o.y };
   return { d0: o.d - 14, d1: o.d + 14, y0: gy + o.y - 72, y1: gy + o.y }; // enemy
 }
 
@@ -392,8 +423,8 @@ function update(dt) {
   for (const lane of lanes) {
     const r = lane.body, k0 = swingK(r);
     r.attackCd -= dt; r.swingT += dt;
-    // the club hitting the ground kicks up a little dust
-    if (r.attack === 'club' && k0 < CLUB_KEYS.impact && swingK(r) >= CLUB_KEYS.impact)
+    // a heavy weapon hitting the ground kicks up a little dust
+    if (ITEMS[r.attack] && ITEMS[r.attack].melee && k0 < CLUB_KEYS.impact && swingK(r) >= CLUB_KEYS.impact)
       burst(player.off + 45, gy + r.y, 10, 0.5, lane.side, '#ffffff');
   }
   // A click is remembered for a moment, so one made just before the weapon is ready still fires.
@@ -438,8 +469,10 @@ function update(dt) {
       // ground enemies walk toward you (but wait behind an overhead wall rather than walk into it);
       // platform guards and throwers hold their ground
       const walking = o.walks && !o.stun && !lane.obs.some(b => b.type === 'bar' && o.d - b.d > 0 && o.d - b.d < 90);
-      o.d -= (speed + (walking ? 25 : 0)) * dt; o.t += dt;
+      const step = o.kind !== 'brute' ? 25 : bruteBusy(o) || o.kb > 30 ? 0 : BRUTE.walk;  // brutes plant their feet to swing
+      o.d -= (speed + (walking ? step : 0)) * dt; o.t += dt;
       if (o.kind === 'thrower') updateThrower(lane, o, dt);
+      if (o.kind === 'brute') updateBrute(lane, o, dt);
       // walking enemies follow the terrain: hop up onto raised ground, drop into holes
       if (o.walks) {
         const s = surfaceAt(lane, o.d, o.y, true);
@@ -465,7 +498,7 @@ function update(dt) {
         continue;
       }
       if (o.type === 'wave') {  // shockwaves roll along the ground: jump them or get up on a platform
-        if (!o.hit && player.invuln <= 0 && r.y > -BOSS.waveH && Math.abs(o.d - player.off) < 24) hurtPlayer(o, gy);
+        if (!o.hit && player.invuln <= 0 && r.y > -BOSS.waveH && Math.abs(o.d - player.off) < 24) hurtPlayer(o, gy, lane);
         if (o.d < -30) o.dead = true;
         continue;
       }
@@ -496,7 +529,7 @@ function update(dt) {
           popups.push({ x: o.d, y: gy + o.y - 34, vx: 30, vy: -200, text: 'DEFLECT', word: true, side: lane.side, life: 0.8, age: 0 });
           continue;
         }
-        if (touching && player.invuln <= 0) { hurtPlayer(o, gy); o.dead = true; }
+        if (touching && player.invuln <= 0) { hurtPlayer(o, gy, lane); o.dead = true; }
         continue;
       }
       // Blocks and ledges are safe to stand on; only running into the side hurts,
@@ -507,6 +540,10 @@ function update(dt) {
         r.y = -supportTop(o); r.vy = 0; r.grounded = true;
         continue;
       }
+      // a brute's axe only hurts while it's coming down, anywhere in front of him or over his head
+      if (o.kind === 'brute' && o.swingT > 0 && !o.swingHit && player.invuln <= 0 && overlaps(bruteZone(o, gy), pb)) {
+        o.swingHit = true; hurtPlayer({}, gy, lane); shake = Math.max(shake, 10);
+      }
       // Each punch can hit each enemy once; both runners punch, so it lands in either lane
       // (as long as that runner is roughly on the enemy's level).
       if (o.type === 'enemy' && hitting && !r.hits.has(o) && Math.abs(r.y - o.y) < 60 &&
@@ -515,7 +552,11 @@ function update(dt) {
         hitEnemy(o, lane, gy, meleeOf(r));
         continue;
       }
-      if (!o.hit && player.invuln <= 0 && touching) hurtPlayer(o, gy);
+      if (!o.hit && player.invuln <= 0 && touching) {
+        hurtPlayer(o, gy, o.type === 'enemy' ? lane : null);
+        // a brute doesn't fall over when he walks into you: he shoves you off and keeps coming
+        if (o.kind === 'brute') { o.hit = false; if (o.d > player.off - 5) o.kb = Math.max(o.kb, 150 * BRUTE.kbDecay); }
+      }
     }
     if (boss) bossVsRunner(lane, r, pb, hitting, gy);
     lane.obs = lane.obs.filter(o => o.d + (o.len || 0) / 2 > -60 && !o.dead);
@@ -534,12 +575,24 @@ function update(dt) {
   shake *= Math.pow(0.002, dt);
 }
 
-function hurtPlayer(o, gy) {
-  o.hit = true; player.lives--; player.invuln = 1.2; shake = 16;
+// `lane` is set for enemy attacks (not terrain), so a runner holding a blocking weapon can turn them aside.
+function hurtPlayer(o, gy, lane = null) {
+  o.hit = true;
+  const w = lane && lane.body.weapon && ITEMS[lane.body.weapon];
+  if (w && w.block && Math.random() < w.block) { blockHit(lane, gy); return; }
+  player.lives--; player.invuln = 1.2; shake = 16;
   burst(player.off, gy - 35, 20, 1.2);
   if (player.lives <= 0) {
     game.state = 'over'; game.best = Math.max(game.best, Math.floor(distance / 10));
   }
+}
+
+function blockHit(lane, gy) {
+  const x = player.off + 16, y = gy + lane.body.y - 42;
+  impact = { t: 0.06, dur: 0.06, deflect: true, side: lane.side, x, y };  // same parry flash as a deflect
+  burst(x, y, 16, 0.9, lane.side, '#ffffff');
+  burst(x, y, 8, 0.6, lane.side);
+  popups.push({ x, y: y - 34, vx: 30, vy: -200, text: 'BLOCK', word: true, side: lane.side, life: 0.8, age: 0 });
 }
 
 // Coin drops: 1-3 is the usual haul, 4-6 is a lucky one.
@@ -569,6 +622,35 @@ function updateDroppedCoin(lane, o, dt) {
 }
 
 const overlaps = (a, b) => a.d0 < b.d1 && a.d1 > b.d0 && a.y0 < b.y1 && a.y1 > b.y0;
+
+// Brutes lumber forward and, once you're in reach (or right over them), wind up and swing.
+const bruteBusy = o => o.windT > 0 || o.swingT > 0 || o.recT > 0;
+const bruteZone = (o, gy) => ({ d0: o.d - BRUTE.reach, d1: o.d + 30, y0: gy + o.y - BRUTE.zone.hi, y1: gy + o.y - BRUTE.zone.lo });
+function updateBrute(lane, o, dt) {
+  o.flashT -= dt; o.cd -= dt;
+  if (o.kb > 1) { o.d = Math.min(W / 2 - 30, o.d + o.kb * dt); o.kb *= Math.exp(-BRUTE.kbDecay * dt); } else o.kb = 0;
+  if (o.windT > 0) {
+    o.windT -= dt;
+    if (o.windT <= 0) { o.swingT = BRUTE.swing; o.swingHit = false; }
+    return;
+  }
+  if (o.swingT > 0) {
+    o.swingT -= dt;
+    if (o.swingT <= 0) { o.recT = BRUTE.recover; burst(o.d - BRUTE.reach * 0.7, groundY() + o.y - 50, 10, 0.6, lane.side, '#ffffff'); }
+    return;
+  }
+  if (o.recT > 0) { o.recT -= dt; return; }
+  const gap = o.d - player.off;
+  if (o.cd <= 0 && gap < BRUTE.reach + 30 && gap > -30 && o.d < W / 2 - 20 && Math.abs(lane.body.y - o.y) < 260) {
+    o.windT = BRUTE.windup; o.cd = BRUTE.cycle;
+  }
+}
+// Hits shove a brute back: enough to cover the ground that scrolls by before this weapon is ready
+// again, plus a little, so the fight stays in front of you.
+function knockBrute(o, weapon) {
+  const push = speed / ATTACK_SPEED[weapon.attackSpeed] + BRUTE.kbExtra;
+  o.kb = Math.max(o.kb, push * BRUTE.kbDecay);  // eased out, it covers push px in total
+}
 
 // Throwers stand their ground and, once on screen, wind up and toss a slow shuriken every few seconds.
 function updateThrower(lane, o, dt) {
@@ -602,8 +684,9 @@ function dropItems(lane, e, item, n) {
 function addLabel(lane, key) {
   const it = ITEMS[key];
   const ex = labels.find(l => l.side === lane.side && l.key === key && l.life > 0.4);
-  if (ex) { ex.count++; ex.life = 1.8; ex.age = 0; return; }
-  labels.push({ side: lane.side, key, text: it.name, color: RARITY[it.rarity], count: 1, life: 1.8, age: 0, rise: 0 });
+  const life = it.tooltip ? 3.2 : 1.8;  // flavor text stays up long enough to read
+  if (ex) { ex.count++; ex.life = life; ex.age = 0; return; }
+  labels.push({ side: lane.side, key, text: it.name, tip: it.tooltip, color: RARITY[it.rarity], count: 1, life, age: 0, rise: 0 });
 }
 
 function hitEnemy(o, lane, gy, weapon = PUNCH) {
@@ -611,23 +694,26 @@ function hitEnemy(o, lane, gy, weapon = PUNCH) {
   const dmg = Math.round((weapon.min + Math.random() * (weapon.max - weapon.min)) * (crit ? weapon.critMult : 1));
   o.hp -= dmg;
   const fy = gy + o.y;  // the enemy's feet
-  popups.push({ x: o.d, y: fy - 90, vx: 40 + Math.random() * 60, vy: -260, text: dmg, crit,
+  const brute = o.kind === 'brute';
+  popups.push({ x: o.d, y: fy - (brute ? 135 : 90), vx: 40 + Math.random() * 60, vy: -260, text: dmg, crit,
                 side: lane.side, life: 1.0, age: 0 });
   if (o.hp <= 0) {
     o.dead = true;
     // (screen shake is saved for truly big moments: explosions, boss hits)
-    impact = { t: crit ? 0.13 : 0.07, dur: crit ? 0.13 : 0.07, crit, side: lane.side, x: o.d, y: fy - 40 };
+    impact = { t: crit ? 0.13 : 0.07, dur: crit ? 0.13 : 0.07, crit, side: lane.side, x: o.d, y: fy - (brute ? 60 : 40) };
     burst(o.d, fy - 45, crit ? 40 : 26, crit ? 1.8 : 1.3, lane.side);
     if (crit) burst(o.d, fy - 45, 24, 1.5, lane.side, '#ffd23f');
     dropCoins(lane, o);
     if (o.kind === 'thrower') dropItems(lane, o, 'shuriken', rollWeighted(SHURIKEN_DROP_WEIGHTS));
+    if (brute) { dropCoins(lane, o); if (Math.random() < BRUTE.axeDrop) dropItems(lane, o, 'axe', 1); }
     // the enemy's body snaps apart into flying sticks
-    for (let i = 0; i < 6; i++) particles.push({
+    for (let i = 0; i < (brute ? 10 : 6); i++) particles.push({
       x: o.d, y: fy - 20 - Math.random() * 50, vx: 150 + Math.random() * 350, vy: -300 - Math.random() * 400,
       life: 1.2, side: lane.side, stick: 12 + Math.random() * 8, rot: Math.random() * 6, spin: (Math.random() - 0.5) * 30 });
   } else {
-    // (no knockback: a hit that doesn't kill just sparks)
-    burst(o.d, fy - 45, 10, 0.8, lane.side);
+    // (no knockback, except on brutes: a hit that doesn't kill just sparks)
+    burst(o.d, fy - (brute ? 65 : 45), 10, 0.8, lane.side);
+    if (brute) { knockBrute(o, weapon); o.flashT = 0.07; }
   }
 }
 
@@ -903,7 +989,7 @@ function bossVsRunner(lane, r, pb, hitting, gy) {
   const z = b.zones[lane.side];
   if (z && SWINGS.includes(b.state) && b.swingSide === lane.side && !b.swingHit[lane.side] && player.invuln <= 0 &&
       overlaps(zoneBox(z, gy), pb)) {
-    b.swingHit[lane.side] = true; hurtPlayer({}, gy); shake = Math.max(shake, 10);
+    b.swingHit[lane.side] = true; hurtPlayer({}, gy, lane); shake = Math.max(shake, 10);
   }
 }
 
@@ -1043,6 +1129,7 @@ function drawStick(x, gy, pose) {
 }
 
 function drawEnemy(x, gy, o) {
+  if (o.kind === 'brute') return drawBrute(x, gy, o);
   const thrower = o.kind === 'thrower';
   ctx.save(); ctx.translate(2 * x, 0); ctx.scale(-1, 1);  // face the player
   // Thrower animation: settle, lean back to cock the arm, then lunge forward with an overhand whip.
@@ -1111,6 +1198,77 @@ function drawClub(x, y, a, s, color = INK) {
   ctx.moveTo(51, -4); ctx.lineTo(60, 0); ctx.lineTo(51, 4);
   ctx.fill();
   ctx.restore();
+}
+
+// Battle axe: handle out along angle `a` (0 = forward, negative = up), a double-bitted head at the end.
+function drawAxe(x, y, a, s, color = INK) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a); ctx.scale(s, s);
+  ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.lineWidth = 5; seg(-4, 0, 54, 0);
+  ctx.beginPath();
+  for (const k of [-1, 1]) {  // a flared blade on each side, the cutting edge curving out
+    ctx.moveTo(38, -3 * k); ctx.lineTo(46, -3 * k); ctx.lineTo(56, -22 * k);
+    ctx.quadraticCurveTo(42, -32 * k, 28, -22 * k); ctx.closePath();
+  }
+  ctx.moveTo(52, -3); ctx.lineTo(61, 0); ctx.lineTo(52, 3);
+  ctx.fill();
+  ctx.restore();
+}
+const drawMelee = (key, x, y, a, s, color) => (key === 'axe' ? drawAxe : drawClub)(x, y, a, s, color);
+
+// A brute: a squat, heavy stick figure with a huge axe, drawn in lane space facing the runner.
+// The axe rests back over his shoulder, heaves further back to wind up, then comes over the top.
+function drawBrute(x, gy, o) {
+  const ink = o.flashT > 0 ? '#ffffff' : INK;
+  const winding = o.windT > 0, swinging = o.swingT > 0, staggered = o.kb > 30;
+  const wk = winding ? 1 - o.windT / BRUTE.windup : 0;
+  ctx.save(); ctx.translate(x, gy); ctx.scale(-1, 1);  // local: +x faces the runner, 0 is his feet
+  ctx.strokeStyle = ink; ctx.fillStyle = ink; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const walk = winding || swinging || o.recT > 0 || staggered ? 0 : Math.sin(o.t * 5);
+  ctx.lineWidth = 11;
+  seg(-9, -42, -10 + walk * 9, -3); seg(9, -42, 10 - walk * 9, -3);
+  // lean back into the windup, forward through the chop, and reel when knocked back
+  const lean = winding ? -0.14 * wk : swinging ? 0.14 : staggered ? -0.16 : 0;
+  ctx.translate(0, -42); ctx.rotate(lean); ctx.translate(0, 42);
+  const bob = Math.abs(walk) * -2;
+  ctx.beginPath(); ctx.ellipse(0, -72 + bob, 26, 31, 0.08, 0, Math.PI * 2); ctx.fill();
+  ctx.lineWidth = 9; seg(-12, -88 + bob, -20, -60 + bob);
+  ctx.beginPath(); ctx.arc(9, -108 + bob, 14, 0, Math.PI * 2); ctx.fill();
+  ctx.save(); ctx.fillStyle = '#ff3b3b';
+  if (winding) { ctx.shadowColor = '#ff3b3b'; ctx.shadowBlur = 12; }
+  ctx.beginPath(); ctx.arc(15, -110 + bob, winding ? 3.4 : 2.6, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  let a = -2.2 + walk * 0.05;
+  if (winding) a = -2.2 - 0.7 * wk + Math.sin(time * 40) * 0.05 * wk;
+  else if (swinging) a = -2.9 + (BRUTE.endA + 2.9) * easeOut(1 - o.swingT / BRUTE.swing);
+  else if (o.recT > 0) a = BRUTE.endA + (-2.2 - BRUTE.endA) * (1 - o.recT / BRUTE.recover);
+  const sx = 8, sy = -90 + bob, hx = sx + Math.cos(a) * 20, hy = sy + Math.sin(a) * 20;
+  if (winding) {  // ghost of the chop: a dashed arc tracing where the axe head is about to go
+    ctx.save(); ctx.strokeStyle = '#ff5a4a'; ctx.globalAlpha = 0.15 + 0.45 * wk; ctx.lineWidth = 2 + 2 * wk;
+    ctx.setLineDash([7, 7]); ctx.lineDashOffset = -time * 30;
+    ctx.beginPath(); ctx.arc(sx, sy, 112, -2.9, -2.9 + (BRUTE.endA + 2.9) * Math.min(1, wk * 1.4)); ctx.stroke(); ctx.restore();
+  }
+  if (swinging) {  // heavy smear behind the axe head
+    ctx.save(); ctx.strokeStyle = '#ffffff'; ctx.globalAlpha = 0.55; ctx.lineWidth = 18;
+    ctx.beginPath(); ctx.arc(sx, sy, 105, -2.9, a); ctx.stroke(); ctx.restore();
+  }
+  ctx.lineWidth = 9; seg(sx, sy, hx, hy);
+  ctx.save();
+  if (winding) { ctx.shadowColor = '#ff3b3b'; ctx.shadowBlur = 8 + 16 * wk; }
+  drawAxe(hx, hy, a, 1.75, ink);
+  ctx.restore();
+  ctx.restore();
+  if (winding) {  // telegraph: a red "!" over his head, like the throwers
+    const s = 0.7 + Math.min(1, wk * 3) * 0.3;
+    ctx.fillStyle = '#ff3b3b';
+    ctx.fillRect(x - 3 * s, gy - 168 + (1 - s) * 10, 6 * s, 18 * s);
+    ctx.beginPath(); ctx.arc(x, gy - 142, 3.5 * s, 0, Math.PI * 2); ctx.fill();
+  }
+  if (o.hp < o.maxHp) {  // a little health bar once he's been hit
+    const w = 46, bx = x - w / 2, by = gy - 132;
+    ctx.fillStyle = INK; ctx.fillRect(bx - 2, by - 2, w + 4, 8);
+    ctx.fillStyle = '#3a1016'; ctx.fillRect(bx, by, w, 4);
+    ctx.fillStyle = '#ff3b3b'; ctx.fillRect(bx, by, w * Math.max(0, o.hp / o.maxHp), 4);
+  }
 }
 
 // The boss: a hulking horned brute, drawn in screen space across the seam, facing boss.f.
@@ -1410,9 +1568,9 @@ function drawLane(lane, sky) {
       ctx.fillStyle = sky.accent; ctx.fillRect(o.d - 26, by - 52, 52, 6);
     }
     else if (o.type === 'star') drawStar(o, gy, sky);
-    else if (o.type === 'item' && o.item === 'club') {
-      ctx.save(); ctx.shadowColor = RARITY.rare; ctx.shadowBlur = 16;
-      drawClub(o.d - 20, gy + o.y + Math.sin(o.t * 3) * 2, -0.35, 0.9);
+    else if (o.type === 'item' && ITEMS[o.item].melee) {
+      ctx.save(); ctx.shadowColor = RARITY[ITEMS[o.item].rarity]; ctx.shadowBlur = 16;
+      drawMelee(o.item, o.d - 20, gy + o.y + Math.sin(o.t * 3) * 2, -0.35, 0.9);
       ctx.restore();
     }
     else if (o.type === 'item') drawShuriken(o.d, gy + o.y + Math.sin(o.t * 3) * 2, o.t * 1.5, '#ffffff', true);
@@ -1442,17 +1600,17 @@ function drawLane(lane, sky) {
     const swinging = swingK(r) < 1;
     const throwing = r.attack === 'throw' && swinging;
     const deflect = r.deflectT > 0 ? 1 - r.deflectT / DEFLECT_T : -1;
-    // the club stays put in the front hand while running, and only leaves the shoulder for a swing
-    const carrying = r.weapon === 'club' && !(r.ammo.shuriken > 0) && !throwing && deflect < 0;
-    const club = r.attack === 'club' && swinging ? clubPose(swingK(r))
+    // a heavy weapon stays put in the front hand while running, and only leaves the shoulder for a swing
+    const carrying = !!r.weapon && !(r.ammo.shuriken > 0) && !throwing && deflect < 0;
+    const club = r.attack === r.weapon && swinging ? clubPose(swingK(r))
                : carrying ? { reach: CLUB_REST[0], a: CLUB_REST[1], lean: CLUB_REST[2], carry: true } : null;
     const hand = drawStick(player.off, gy + r.y, {
       phase: player.phase, mode, throwing, deflect, club,
       punch: r.attack === 'punch' && swinging && deflect < 0 ? PUNCH.swing.dur - r.swingT : 0 });
     // a runner carrying shurikens holds one, so you can tell at a glance who's armed
     if (r.ammo.shuriken > 0 && !throwing && deflect < 0 && hand) drawShuriken(hand[0], hand[1], time * 3, sky.accent, false, 0.75);
-    else if (r.weapon === 'club' && hand) {
-      // the club rests up over the shoulder; swinging, it's held in both hands (see clubPose)
+    else if (r.weapon && hand) {
+      // the weapon rests up over the shoulder; swinging, it's held in both hands (see clubPose)
       const a = club ? club.a : -2.0;
       if (club && club.smear) {  // a white smear behind the head as it comes down, centred on the shoulder
         const hx = hand[0] + Math.cos(a) * 34 - hand[2], hy = hand[1] + Math.sin(a) * 34 - hand[3];
@@ -1460,7 +1618,7 @@ function drawLane(lane, sky) {
         ctx.save(); ctx.strokeStyle = '#ffffff'; ctx.globalAlpha = 0.55; ctx.lineWidth = 7; ctx.lineCap = 'round';
         ctx.beginPath(); ctx.arc(hand[2], hand[3], Math.hypot(hx, hy), Math.max(-4.2, end - 2.2), end); ctx.stroke(); ctx.restore();
       }
-      drawClub(hand[0], hand[1], a, 0.85);
+      drawMelee(r.weapon, hand[0], hand[1], a, 0.85);
     }
     if (deflect >= 0) {  // the swat leaves a bright crescent in front of the runner
       const cx = player.off + 8, cy = gy + r.y - STAR.y, sweep = Math.min(1, deflect * 2.2);
@@ -1589,6 +1747,27 @@ function drawBossUI() {
   if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${Math.min(1, fade)})`; ctx.fillRect(0, 0, W, H); }
 }
 
+// Terraria-style item tooltip at the cursor: name in its rarity color, stats, then flavor text.
+function drawTooltip(key, mx, my) {
+  const it = ITEMS[key];
+  const dmg = it.min === it.max ? it.min : `${it.min}-${it.max}`;
+  const lines = [[it.name, '700 16px system-ui, sans-serif', RARITY[it.rarity]],
+                 [`${dmg} damage · ${it.attackSpeed} speed`, '500 14px system-ui, sans-serif', '#ffffff'],
+                 [`${Math.round(it.critChance * 100)}% crit chance`, '500 14px system-ui, sans-serif', '#ffffff']];
+  if (it.block) lines.push([`${Math.round(it.block * 100)}% chance to block an attack`, '500 14px system-ui, sans-serif', '#ffffff']);
+  if (it.tooltip) lines.push([it.tooltip, 'italic 500 14px system-ui, sans-serif', '#c9bfd6']);
+  let w = 0;
+  for (const [t, f] of lines) { ctx.font = f; w = Math.max(w, ctx.measureText(t).width); }
+  const pad = 10, h = lines.length * 20 + pad * 2 - 4;
+  const x = Math.max(8, Math.min(W - w - pad * 2 - 8, mx + 16)), y = Math.max(8, Math.min(H - h - 8, my + 16));
+  ctx.save();
+  ctx.fillStyle = 'rgba(20,14,40,0.92)'; ctx.strokeStyle = 'rgba(120,110,200,0.9)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.rect(x, y, w + pad * 2, h); ctx.fill(); ctx.stroke();
+  ctx.textAlign = 'left';
+  lines.forEach(([t, f, c], i) => { ctx.font = f; ctx.fillStyle = c; ctx.fillText(t, x + pad, y + pad + 14 + i * 20); });
+  ctx.restore();
+}
+
 const SKIES = {
   '-1': { top: '#2a1631', bot: '#ff8a4c', hill: 'rgba(40,18,40,0.55)', accent: '#ffb347', cave: '#5a2a35' },
   '1':  { top: '#141a3a', bot: '#5fb4ff', hill: 'rgba(15,22,55,0.55)', accent: '#7fd8ff', cave: '#22345e' },
@@ -1665,21 +1844,36 @@ function draw() {
     const gy = groundY(), stack = { '-1': 0, '1': 0 };
     for (const l of labels) {
       const r = lanes[l.side < 0 ? 0 : 1].body;
-      const x = l.side < 0 ? player.off : W - player.off;
-      const y = gy + r.y - 100 - l.rise - stack[l.side]++ * 22;
+      let x = l.side < 0 ? player.off : W - player.off;
+      const y = gy + r.y - 100 - l.rise - stack[l.side];
+      stack[l.side] += l.tip ? 42 : 22;
+      if (l.tip) {  // keep the (long) flavor line on screen
+        ctx.font = 'italic 500 14px system-ui, sans-serif';
+        const half = ctx.measureText(l.tip).width / 2 + 10;
+        x = Math.max(half, Math.min(W - half, x));
+      }
       const pop = 1 + Math.max(0, 0.12 - l.age) * 2.5;
       ctx.save(); ctx.translate(x, y); ctx.scale(pop, pop);
       ctx.globalAlpha = Math.min(1, l.life * 1.5);
       ctx.font = '700 18px system-ui, sans-serif'; ctx.lineWidth = 4; ctx.strokeStyle = INK; ctx.lineJoin = 'round';
       const text = l.count > 1 ? `${l.text} (${l.count})` : l.text;
-      ctx.strokeText(text, 0, 0); ctx.fillStyle = l.color; ctx.fillText(text, 0, 0);
+      const ty = l.tip ? -20 : 0;
+      ctx.strokeText(text, 0, ty); ctx.fillStyle = l.color; ctx.fillText(text, 0, ty);
+      if (l.tip) {
+        ctx.font = 'italic 500 14px system-ui, sans-serif'; ctx.lineWidth = 3;
+        ctx.strokeText(l.tip, 0, 0); ctx.fillStyle = '#e6dcef'; ctx.fillText(l.tip, 0, 0);
+      }
       ctx.restore();
     }
 
-    // each runner's melee weapon, under its ammo in the outer top corner
+    // each runner's melee weapon, under its ammo in the outer top corner; hover it for its stats
     for (const lane of lanes) {
-      if (lane.body.weapon !== 'club') continue;
-      drawClub(lane.side < 0 ? 22 : W - 22, 74, lane.side < 0 ? -0.5 : Math.PI + 0.5, 0.6, '#ffffff');
+      if (!lane.body.weapon) continue;
+      drawMelee(lane.body.weapon, lane.side < 0 ? 22 : W - 22, 74, lane.side < 0 ? -0.5 : Math.PI + 0.5, 0.6, '#ffffff');
+    }
+    for (const lane of lanes) {
+      const x = lane.side < 0 ? 30 : W - 30;
+      if (lane.body.weapon && Math.abs(mouse.x - x) < 30 && Math.abs(mouse.y - 66) < 24) drawTooltip(lane.body.weapon, mouse.x, mouse.y);
     }
     drawBossUI();
   }
@@ -1694,7 +1888,7 @@ function draw() {
     ctx.fillText('W / Space  jump    S  slide / fast-fall    A / D  move    Click  punch', W / 2, H * 0.55);
     ctx.fillText('Both runners copy your every move. Survive both worlds.', W / 2, H * 0.55 + 32);
     ctx.globalAlpha = 0.5;
-    ctx.fillText('Testing:  1 enemies   2 platform   3 throwers   4 boss   5 club   R restart', W / 2, H * 0.55 + 64);
+    ctx.fillText('Testing:  1 enemies   2 platform   3 throwers   4 boss   5 club   6 brutes   7 axe   8 skip boss   R restart', W / 2, H * 0.55 + 64);
     ctx.globalAlpha = 0.5 + 0.5 * Math.sin(performance.now() / 300);
     ctx.fillText(game.state === 'over' ? 'Space or click to retry' : 'Space or click to start', W / 2, H * 0.68);
     ctx.globalAlpha = 1;
