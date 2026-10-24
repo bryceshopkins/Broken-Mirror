@@ -36,6 +36,7 @@ window.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   // Escape freezes the run and opens the inventory; while it's open, nothing else reaches the game
   if (k === 'escape') { if (game.state === 'play') setPaused(!game.paused); return; }
+  if (k === '=' && !keys[k]) { wallet += 1000; saveWallet(); }  // testing: +1000 gold (works in the shop too)
   if (game.paused) { keys[k] = true; return; }
   if ((k === 'w' || k === ' ') && !keys[k]) jumpPressed = true;
   if ((k === ' ' || k === 'enter') && game.state !== 'play') startGame();
@@ -55,18 +56,20 @@ window.addEventListener('keydown', e => {
   if (k === ' ') e.preventDefault();
 });
 window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
-const mouse = { x: 0, y: 0 };
+const mouse = { x: 0, y: 0, held: false };
 canvas.addEventListener('mousemove', e => {
   mouse.x = e.clientX; mouse.y = e.clientY;
   // in the inventory, pressing on an item and moving a few px picks it up
   const d = menu.down;
   if (d && !menu.drag && laneFor(d.side).body.inv[d.i] && Math.hypot(mouse.x - d.x, mouse.y - d.y) > 5) menu.drag = d;
-  canvas.style.cursor = game.paused ? (menu.drag ? 'grabbing' : menuSlotAt(mouse.x, mouse.y) ? 'pointer' : 'default')
+  canvas.style.cursor = game.paused ? (menu.drag ? 'grabbing' : menuSlotAt(mouse.x, mouse.y) || shopButtonAt(mouse.x, mouse.y) ? 'pointer' : 'default')
                       : game.state === 'play' && hotbarAt(mouse.x, mouse.y) ? 'pointer' : '';
 });
 canvas.addEventListener('mousedown', e => {
   mouse.x = e.clientX; mouse.y = e.clientY;
   if (game.paused) {
+    const sb = shopButtonAt(mouse.x, mouse.y);
+    if (sb) { buy(sb.row, sb.side); return; }
     const s = menuSlotAt(mouse.x, mouse.y);
     menu.down = s ? { ...s, x: mouse.x, y: mouse.y } : null;
     return;
@@ -74,9 +77,10 @@ canvas.addEventListener('mousedown', e => {
   if (game.state !== 'play') { startGame(); return; }
   // clicking a hotbar slot switches to it instead of attacking
   const hb = hotbarAt(mouse.x, mouse.y);
-  if (hb) selectSlot(laneFor(hb.side), hb.i); else punchPressed = true;
+  if (hb) selectSlot(laneFor(hb.side), hb.i); else punchPressed = mouse.held = true;
 });
 window.addEventListener('mouseup', () => {
+  mouse.held = false;
   const { down, drag } = menu;
   menu.down = menu.drag = null;
   if (!game.paused || !down) return;
@@ -86,7 +90,7 @@ window.addEventListener('mouseup', () => {
   } else if (down.i < HOTBAR) selectSlot(laneFor(down.side), down.i);  // a plain click on a hotbar slot holds it
 });
 function setPaused(on) {
-  game.paused = on; menu.down = menu.drag = null;
+  game.paused = on; menu.down = menu.drag = null; mouse.held = false;
   jumpPressed = punchPressed = false;
   canvas.style.cursor = on ? 'default' : '';
 }
@@ -108,7 +112,7 @@ const ENEMY_HP = 12;
 //   range        how far in front of the runner a melee hit reaches (px)
 //   swing        how long the attack animation lasts (s), and when in it the hit is live
 //                (as fractions of that time)
-const ATTACK_SPEED = { fast: 5, medium: 3.3, slow: 1.4 };  // attacks per second
+const ATTACK_SPEED = { extreme: 12, fast: 5, medium: 3.3, slow: 1.4 };  // attacks per second
 const ATTACK_BUFFER = 0.2;  // s a click is remembered while the weapon is still recovering
 const PUNCH = { name: 'Fists', rarity: 'common', melee: true, anim: 'punch', attackSpeed: 'medium', min: 12, max: 16,
                 critChance: 0.2, critMult: 2, range: 80, swing: { dur: 0.24, hit: [0.12, 0.88] },
@@ -117,16 +121,26 @@ const PUNCH = { name: 'Fists', rarity: 'common', melee: true, anim: 'punch', att
 // Items. They belong to whichever runner picks them up, so the two sides can end up differently
 // armed. Rarity sets the color of the item's name. `desc` is the tooltip flavor text in the inventory.
 //   melee       swung when it's the selected hotbar item (`anim` picks the animation)
-//   throwSpeed  thrown, one per attack, used up from the stack
+//   throwSpeed  thrown, one per attack, used up from the stack (`lob`: falls and bounces, like the grenade)
+//   beam        fires a piercing laser at the cursor; `auto` keeps firing while the mouse is held
+//   aoe         explodes, hitting everything within this radius (you too, if you're close)
+//   heal        lives restored when used from the hotbar
 //   stack       how many fit in one slot (default 1)
 //   type        what the tooltip calls items that aren't weapons
-const RARITY = { common: '#ffffff', uncommon: '#5bd16a', rare: '#4da6ff', epic: '#c77dff' };
+const RARITY = { common: '#ffffff', uncommon: '#5bd16a', rare: '#4da6ff', epic: '#c77dff', legendary: '#ff9f1c' };
 const ITEMS = {
   shuriken: { name: 'Shuriken', rarity: 'common', stack: 99, attackSpeed: 'fast', min: 12, max: 16, critChance: 0.2, critMult: 2,
               throwSpeed: 650, swing: { dur: 0.18, hit: [0, 0] }, desc: 'Placeholder tooltip.' },
   club: { name: 'Spiked Club', rarity: 'rare', melee: true, anim: 'club', attackSpeed: 'slow', min: 24, max: 32, critChance: 0.2, critMult: 2,
           range: 145, swing: { dur: 0.7, hit: [0.36, 1] },  // live from the downswing on, so spam-clicking covers you
           desc: 'Placeholder tooltip.' },
+  // shop items
+  grenade: { name: 'Grenade', rarity: 'uncommon', stack: 20, attackSpeed: 'slow', min: 50, max: 50, critChance: 0, critMult: 1,
+             throwSpeed: 560, lob: true, aoe: 110, swing: { dur: 0.3, hit: [0, 0] },
+             desc: 'Placeholder tooltip.' },
+  bandage: { name: 'Bandage', rarity: 'common', type: 'Consumable', stack: 10, heal: 1, desc: 'Placeholder tooltip.' },
+  obliterator: { name: 'The Obliterator', rarity: 'legendary', beam: true, auto: true, attackSpeed: 'extreme', min: 200, max: 200,
+                 critChance: 0.1, critMult: 2, swing: { dur: 0.07, hit: [0, 0] }, desc: 'Placeholder tooltip.' },
   // Placeholders, so the inventory has something in it. Weapons swing with the punch animation for now.
   dagger: { name: 'Rusty Dagger', rarity: 'common', melee: true, anim: 'punch', attackSpeed: 'fast', min: 8, max: 11,
             critChance: 0.35, critMult: 2, range: 75, swing: { dur: 0.16, hit: [0.1, 0.9] }, desc: 'Placeholder tooltip.' },
@@ -135,9 +149,9 @@ const ITEMS = {
   snack: { name: 'Mystery Snack', rarity: 'common', type: 'Consumable', stack: 20, desc: 'Placeholder tooltip. (Can\'t be used yet.)' },
   pebble: { name: 'Suspicious Pebble', rarity: 'epic', type: 'Trinket', desc: 'Placeholder tooltip.' },
 };
-const attackOf = r => (r.attack === 'throw' ? ITEMS.shuriken : r.attack === 'punch' ? PUNCH : ITEMS[r.attack]);
+const attackOf = r => ITEMS[r.attack] || PUNCH;
 const swingK = r => r.swingT / attackOf(r).swing.dur;  // 0-1 through the current attack, >1 once it's over
-const striking = r => { const h = attackOf(r).swing.hit, k = swingK(r); return r.attack !== 'throw' && k >= h[0] && k < h[1]; };
+const striking = r => { const h = attackOf(r).swing.hit, k = swingK(r); return attackOf(r).melee && k >= h[0] && k < h[1]; };
 
 // Boss fights: after `after` seconds of running, every `checkEvery` seconds there's a `chance` one
 // shows up. Beat it and it won't come back this run.
@@ -159,6 +173,7 @@ const BOSS = {
   rage: { roar: 1.0, windup: 1.0, swing: 0.24, back: 0.4, recover: 1.0 },
 };
 let boss = null;
+const MAX_LIVES = 3;
 const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5 };  // thrown at chest height
 const SHURIKEN_DROP_WEIGHTS = [25, 35, 25, 10, 5];  // index = how many a thrower drops (0-4)
 
@@ -433,7 +448,7 @@ function obstacleBox(o, gy) {
   if (o.type === 'spike') return { d0: o.d - 16, d1: o.d + 16, y0: gy + o.y - 20, y1: gy + o.y };
   if (o.type === 'bar')   return { d0: o.d - 26, d1: o.d + 26, y0: 0, y1: gy + o.y - 46 };
   if (o.type === 'coin' || o.type === 'item') return { d0: o.d - 14, d1: o.d + 14, y0: gy + o.y - 14, y1: gy + o.y + 14 };
-  if (o.type === 'star')  return { d0: o.d - 9, d1: o.d + 9, y0: gy + o.y - 9, y1: gy + o.y + 9 };
+  if (o.type === 'star' || o.type === 'grenade') return { d0: o.d - 9, d1: o.d + 9, y0: gy + o.y - 9, y1: gy + o.y + 9 };
   return { d0: o.d - 14, d1: o.d + 14, y0: gy + o.y - 72, y1: gy + o.y }; // enemy
 }
 
@@ -491,23 +506,37 @@ function update(dt) {
   // A click is remembered for a moment, so one made just before the weapon is ready still fires.
   for (const lane of lanes) {
     const r = lane.body;
-    r.queued = punchPressed ? ATTACK_BUFFER : r.queued - dt;
+    const st = r.inv[r.slot], it = st && ITEMS[st.key];
+    // automatic weapons keep firing for as long as the mouse is held down
+    r.queued = punchPressed || (mouse.held && it && it.auto) ? ATTACK_BUFFER : r.queued - dt;
     if (r.queued > 0 && r.attackCd <= 0) {
       r.queued = 0;
-      // what happens depends on the hotbar item in hand: throw it, swing it, or (anything else) punch
-      const st = r.inv[r.slot], it = st && ITEMS[st.key];
+      // what happens depends on the hotbar item in hand: throw it, fire it, use it, swing it, or (anything else) punch
+      // Aiming is at the mouse. Mirrored like everything else: the runner on the far side aims at the
+      // reflection of the cursor, so in lane-space both use the same point.
+      const hand = { d: player.off + 18, y: r.y - STAR.y };
+      const aim = { d: Math.min(mouse.x, W - mouse.x), y: mouse.y - gy };
+      const dx = aim.d - hand.d, dy = aim.y - hand.y, len = Math.hypot(dx, dy) || 1;
+      if (it && it.heal) {  // bandages: patch up a life (not wasted at full health)
+        if (player.lives < MAX_LIVES) {
+          player.lives = Math.min(MAX_LIVES, player.lives + it.heal);
+          if (!--st.n) r.inv[r.slot] = null;
+          burst(player.off, gy + r.y - 40, 14, 0.6, lane.side, '#ff6b8a');
+          popups.push({ x: player.off, y: gy + r.y - 100, vx: 0, vy: -160, text: '+' + it.heal + ' LIFE', word: true, side: lane.side, life: 0.9, age: 0 });
+        }
+        r.attackCd = 0.4;
+        continue;
+      }
       if (it && it.throwSpeed) {
         if (!--st.n) r.inv[r.slot] = null;
-        r.attack = 'throw';
-        // Aim at the mouse. Mirrored like everything else: the runner on the far side aims at the
-        // reflection of the cursor, so in lane-space both use the same point.
-        const hand = { d: player.off + 18, y: r.y - STAR.y };
-        const aim = { d: Math.min(mouse.x, W - mouse.x), y: mouse.y - gy };
-        const dx = aim.d - hand.d, dy = aim.y - hand.y, len = Math.hypot(dx, dy) || 1;
-        const v = ITEMS.shuriken.throwSpeed;
-        lane.obs.push({ type: 'star', friendly: true, d: hand.d, y: hand.y, vd: dx / len * v, vy: dy / len * v,
-                        t: 0, dead: false, hit: false });
+        r.attack = st.key;
+        const v = it.throwSpeed;
+        lane.obs.push({ type: it.lob ? 'grenade' : 'star', item: st.key, friendly: true, d: hand.d, y: hand.y,
+                        vd: dx / len * v, vy: dy / len * v, t: 0, bounces: 0, dead: false, hit: false });
         burst(hand.d, gy + hand.y, 8, 0.5, lane.side);  // release flash
+      } else if (it && it.beam) {
+        r.attack = st.key;
+        fireBeam(lane, hand, dx / len, dy / len, it, gy);
       } else r.attack = it && it.melee ? st.key : 'punch';
       r.swingT = 0; r.hits.clear(); r.attackCd = 1 / ATTACK_SPEED[attackOf(r).attackSpeed];
     }
@@ -518,6 +547,8 @@ function update(dt) {
     lane.hills.forEach(h => { h.x -= speed * 0.25 * dt; if (h.x < -300) h.x += 8 * 220; });
     for (const o of lane.obs) {
       if (o.type === 'slash') { o.t += dt; if (o.t > 0.35) o.dead = true; continue; }
+      if (o.type === 'beam' || o.type === 'boom') { o.t += dt; o.d -= speed * dt; if (o.t > (o.type === 'beam' ? 0.09 : 0.4)) o.dead = true; continue; }
+      if (o.type === 'grenade') { updateGrenade(lane, o, dt, gy); continue; }
       if (o.type === 'wave') {  // boss slam shockwave: rolls toward you, then fizzles out
         o.d -= BOSS.waveSpeed * dt; o.t += dt;
         if (o.t * BOSS.waveSpeed > BOSS.waveRange) o.dead = true;
@@ -549,7 +580,11 @@ function update(dt) {
     const bodyH = r.sliding ? 34 : 70;
     const pb = { d0: player.off - 11, d1: player.off + 11, y0: gy + r.y - bodyH, y1: gy + r.y };
     for (const o of lane.obs) {
-      if (o.dead || o.type === 'platform' || o.type === 'tunnel' || o.type === 'slash') continue;
+      if (o.dead || o.type === 'platform' || o.type === 'tunnel' || o.type === 'slash' || o.type === 'beam' || o.type === 'boom') continue;
+      if (o.type === 'grenade') {  // goes off on contact with an enemy
+        if (lane.obs.some(e => e.type === 'enemy' && !e.dead && overlaps(obstacleBox(o, gy), obstacleBox(e, gy)))) explode(lane, o, gy);
+        continue;
+      }
       const b = obstacleBox(o, gy);
       const touching = b.d0 < pb.d1 && b.d1 > pb.d0 && b.y0 < pb.y1 && b.y1 > pb.y0;
       if (o.type === 'coin') {
@@ -723,6 +758,67 @@ function hitEnemy(o, lane, gy, weapon = PUNCH) {
     // (no knockback: a hit that doesn't kill just sparks)
     burst(o.d, fy - 45, 10, 0.8, lane.side);
   }
+}
+
+// Does the segment (x0, y0)-(x1, y1) pass through box b? (Liang-Barsky clipping)
+function segHitsBox(x0, y0, x1, y1, b) {
+  const dx = x1 - x0, dy = y1 - y0;
+  let t0 = 0, t1 = 1;
+  for (const [p, q] of [[-dx, x0 - b.d0], [dx, b.d1 - x0], [-dy, y0 - b.y0], [dy, b.y1 - y0]]) {
+    if (p === 0) { if (q < 0) return false; continue; }
+    const t = q / p;
+    if (p < 0) { if (t > t1) return false; t0 = Math.max(t0, t); }
+    else { if (t < t0) return false; t1 = Math.min(t1, t); }
+  }
+  return true;
+}
+const bossBox = (side, gy) => { const d = bossD(side); return { d0: d - 36, d1: d + 36, y0: gy + boss.y - 175 * BOSS.scale, y1: gy + boss.y }; };
+
+// Laser: an instant beam from the hand along (ux, uy) that pierces every enemy (and enemy star) in its path.
+function fireBeam(lane, hand, ux, uy, it, gy) {
+  const L = 1600, x0 = hand.d, y0 = gy + hand.y, x1 = x0 + ux * L, y1 = y0 + uy * L;
+  for (const o of lane.obs) {
+    if (o.dead || o.d > W / 2 + 10) continue;  // only what's on screen
+    if (o.type === 'enemy' && segHitsBox(x0, y0, x1, y1, obstacleBox(o, gy))) hitEnemy(o, lane, gy, it);
+    else if (o.type === 'star' && !o.friendly && segHitsBox(x0, y0, x1, y1, obstacleBox(o, gy))) {
+      o.dead = true; burst(o.d, gy + o.y, 8, 0.5, lane.side, '#ffffff');
+    }
+  }
+  if (boss && boss.alive && segHitsBox(x0, y0, x1, y1, bossBox(lane.side, gy))) hitBoss(lane, it, gy);
+  lane.obs.push({ type: 'beam', d: x0, y: hand.y, dx: ux * L, dy: uy * L, t: 0, dead: false, hit: false });
+  burst(x0, y0, 5, 0.4, lane.side, '#ff2b6a');
+}
+
+// Grenades fly in an arc and bounce off whatever floor is under them; the second bounce sets them off.
+function updateGrenade(lane, o, dt, gy) {
+  o.t += dt; o.vy += 1400 * dt; o.y += o.vy * dt; o.d += o.vd * dt;  // carried along at the runner's pace, like shurikens
+  let rest = surfaceAt(lane, o.d, o.y - 8);
+  for (const p of lane.obs) if (p.type === 'platform' && Math.abs(p.d - o.d) < p.len / 2 && -p.h >= o.y - 20) rest = Math.min(rest, -p.h);
+  if (o.vy > 0 && o.y >= rest - 8) {
+    if (++o.bounces >= 2) return explode(lane, o, gy);
+    o.y = rest - 8; o.vy *= -0.55; o.vd *= 0.7;
+    burst(o.d, gy + o.y + 8, 4, 0.3, lane.side, '#ffffff');
+  }
+  if (o.d > W / 2 + 40 || o.d < -40 || gy + o.y > H + 40) o.dead = true;
+}
+// Blast damage to everything in range, the boss included. Too close and it gets the thrower too.
+function explode(lane, o, gy) {
+  const it = ITEMS[o.item], R = it.aoe, cx = o.d, cy = gy + o.y, r = lane.body;
+  o.dead = true;
+  for (const e of lane.obs) {
+    if (e.dead) continue;
+    if (e.type === 'enemy' && Math.hypot(e.d - cx, gy + e.y - 36 - cy) < R + 14) hitEnemy(e, lane, gy, it);
+    else if (e.type === 'star' && !e.friendly && Math.hypot(e.d - cx, gy + e.y - cy) < R) e.dead = true;
+  }
+  if (boss && boss.alive) {
+    const b = bossBox(lane.side, gy);
+    if (cx > b.d0 - R && cx < b.d1 + R && cy > b.y0 - R && cy < b.y1 + R) hitBoss(lane, it, gy);
+  }
+  if (player.invuln <= 0 && Math.hypot(player.off - cx, gy + r.y - 35 - cy) < R * 0.75) hurtPlayer({}, gy);
+  lane.obs.push({ type: 'boom', d: cx, y: o.y, r: R, t: 0, dead: false, hit: false });
+  burst(cx, cy, 30, 1.4, lane.side, '#ffb347');
+  burst(cx, cy, 14, 1.0, lane.side, '#ffffff');
+  shake = Math.max(shake, 12);
 }
 
 // Particles are stored in lane-space (d) and drawn on both sides unless tied to one lane.
@@ -981,8 +1077,7 @@ function rageImpact(side, gy) {
 function bossVsRunner(lane, r, pb, hitting, gy) {
   const b = boss;
   if (!b.alive) return;
-  const d = bossD(lane.side);
-  const bb = { d0: d - 36, d1: d + 36, y0: gy + b.y - 175 * BOSS.scale, y1: gy + b.y };
+  const bb = bossBox(lane.side, gy);
   const melee = attackOf(r), key = 'boss' + lane.side;
   if (hitting && !r.hits.has(key) &&
       bb.d0 < player.off + melee.range && bb.d1 > player.off - 5 && bb.y0 < pb.y1 && bb.y1 > pb.y0) {
@@ -993,6 +1088,7 @@ function bossVsRunner(lane, r, pb, hitting, gy) {
     if (o.type !== 'star' || !o.friendly || o.dead || !boss.alive) continue;
     if (overlaps(obstacleBox(o, gy), bb)) { o.dead = true; hitBoss(lane, ITEMS.shuriken, gy); }
   }
+  for (const o of lane.obs) if (o.type === 'grenade' && !o.dead && boss.alive && overlaps(obstacleBox(o, gy), bb)) explode(lane, o, gy);
   // a swing only hurts in its marked zone, on the side it's aimed at
   const z = b.zones[lane.side];
   if (z && SWINGS.includes(b.state) && b.swingSide === lane.side && !b.swingHit[lane.side] && player.invuln <= 0 &&
@@ -1521,6 +1617,29 @@ function drawLane(lane, sky) {
       }
       ctx.restore();
     }
+    else if (o.type === 'grenade') {
+      drawItemIcon('grenade', o.d, gy + o.y, 0.6, INK);
+      if (o.bounces && Math.floor(o.t * 14) % 2) {  // armed: the light blinks after the first bounce
+        ctx.fillStyle = '#ff3b3b'; ctx.beginPath(); ctx.arc(o.d, gy + o.y + 2, 3, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    else if (o.type === 'beam') {  // laser: a hot pink glow with a white core, gone in a blink
+      const k = 1 - o.t / 0.09, x0 = o.d, y0 = gy + o.y;
+      ctx.save(); ctx.lineCap = 'round'; ctx.globalAlpha = Math.max(0, k);
+      ctx.shadowColor = '#ff2b6a'; ctx.shadowBlur = 18;
+      ctx.strokeStyle = '#ff2b6a'; ctx.lineWidth = 9 * k + 2; seg(x0, y0, x0 + o.dx, y0 + o.dy);
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3 * k + 1; seg(x0, y0, x0 + o.dx, y0 + o.dy);
+      ctx.restore();
+    }
+    else if (o.type === 'boom') {  // explosion: a fireball that swells and fades, with a shock ring
+      const k = o.t / 0.4, x = o.d, y = gy + o.y, R = o.r * (0.45 + 0.55 * easeOut(k * 2));
+      ctx.save(); ctx.globalAlpha = Math.max(0, 1 - k);
+      const g = ctx.createRadialGradient(x, y, 0, x, y, R);
+      g.addColorStop(0, '#fff6d0'); g.addColorStop(0.35, '#ffb347'); g.addColorStop(0.75, 'rgba(255,90,58,0.7)'); g.addColorStop(1, 'rgba(255,59,59,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, o.r * easeOut(k * 1.5), 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
     else drawEnemy(o.d, gy + o.y, o);
   }
 
@@ -1534,7 +1653,8 @@ function drawLane(lane, sky) {
     const idle = speed === 0 && !player.moving;  // standing around in the boss arena
     const mode = r.sliding ? 'slide' : !r.grounded ? 'jump' : idle ? 'stand' : 'run';
     const swinging = swingK(r) < 1;
-    const throwing = r.attack === 'throw' && swinging;
+    const throwing = !!attackOf(r).throwSpeed && swinging;
+    const firing = !!attackOf(r).beam && swinging;  // arm thrust out toward the target while the laser fires
     const deflect = r.deflectT > 0 ? 1 - r.deflectT / DEFLECT_T : -1;
     // whatever's selected on the hotbar is held in the front hand, so you can tell at a glance who's armed;
     // the club stays put on the shoulder while running, and only leaves it for a swing
@@ -1542,8 +1662,8 @@ function drawLane(lane, sky) {
     const club = r.attack === 'club' && swinging ? clubPose(swingK(r))
                : held === 'club' && free ? { reach: CLUB_REST[0], a: CLUB_REST[1], lean: CLUB_REST[2], carry: true } : null;
     const hand = drawStick(player.off, gy + r.y, {
-      phase: player.phase, mode, throwing, deflect, club,
-      punch: attackOf(r).anim === 'punch' && swinging && deflect < 0 ? attackOf(r).swing.dur - r.swingT : 0 });
+      phase: player.phase, mode, throwing, deflect, club, streak: !firing,
+      punch: (attackOf(r).anim === 'punch' || firing) && swinging && deflect < 0 ? attackOf(r).swing.dur - r.swingT : 0 });
     if (hand && (club || held === 'club')) {
       // the club rests up over the shoulder; swinging, it's held in both hands (see clubPose)
       const a = club ? club.a : -2.0;
@@ -1710,6 +1830,23 @@ function drawItemIcon(key, x, y, s = 1, ink = '#f4efe6') {
     ctx.moveTo(9, 0); ctx.lineTo(18, -7); ctx.lineTo(18, 7); ctx.closePath(); ctx.fill();
     ctx.fillStyle = '#ff6b8a'; ctx.beginPath(); ctx.ellipse(0, 0, 11, 8, 0, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = ink; ctx.lineWidth = 2; seg(-3, -7, -6, 7); seg(4, -7, 1, 7);
+  } else if (key === 'grenade') {
+    ctx.beginPath(); ctx.arc(0, 4, 12, 0, Math.PI * 2); ctx.fill();
+    ctx.fillRect(-5, -12, 10, 7);                                 // fuse cap
+    ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(9, -12, 4.5, 0, Math.PI * 2); ctx.stroke();  // pin ring
+    ctx.strokeStyle = 'rgba(11,10,15,0.4)'; seg(-11, 4, 11, 4); seg(0, -7, 0, 15);
+  } else if (key === 'bandage') {
+    ctx.rotate(-0.6);
+    ctx.beginPath(); ctx.roundRect(-19, -7, 38, 14, 6); ctx.fill();
+    ctx.fillStyle = '#e8c9a8'; ctx.fillRect(-6, -7, 12, 14);       // the pad
+    ctx.fillStyle = 'rgba(11,10,15,0.35)';
+    for (const [px, py] of [[-14, -3], [-14, 3], [14, -3], [14, 3]]) { ctx.beginPath(); ctx.arc(px, py, 1.2, 0, Math.PI * 2); ctx.fill(); }
+  } else if (key === 'obliterator') {
+    ctx.beginPath(); ctx.roundRect(-18, -7, 28, 12, 4); ctx.fill();          // body
+    ctx.fillRect(9, -4, 13, 6);                                              // barrel
+    ctx.beginPath(); ctx.moveTo(-14, 4); ctx.lineTo(-6, 4); ctx.lineTo(-9, 16); ctx.lineTo(-16, 16); ctx.fill();  // grip
+    ctx.fillStyle = '#ff2b6a'; ctx.shadowColor = '#ff2b6a'; ctx.shadowBlur = 8;
+    ctx.fillRect(-14, -3, 20, 3); ctx.fillRect(20, -3, 4, 4);                // glowing coil and muzzle
   } else if (key === 'pebble') {
     ctx.beginPath(); ctx.moveTo(-14, 4); ctx.lineTo(-9, -8); ctx.lineTo(3, -12); ctx.lineTo(13, -5); ctx.lineTo(14, 6); ctx.lineTo(4, 11); ctx.lineTo(-9, 10);
     ctx.closePath(); ctx.fill();
@@ -1720,7 +1857,7 @@ function drawItemIcon(key, x, y, s = 1, ink = '#f4efe6') {
 
 // One inventory slot at (x, y), s px square. `keyLabel` marks a hotbar slot (with its hotkey);
 // an empty hotbar slot shows a faint fist, since that's what you attack with from it.
-function drawSlot(x, y, s, stack, { selected = false, accent = '#ffffff', keyLabel = null, lifted = false } = {}) {
+function drawSlot(x, y, s, stack, { selected = false, accent = '#ffffff', keyLabel = null, lifted = false, count = true } = {}) {
   ctx.save();
   ctx.fillStyle = selected ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.07)';
   ctx.beginPath(); ctx.roundRect(x, y, s, s, s * 0.16); ctx.fill();
@@ -1729,7 +1866,7 @@ function drawSlot(x, y, s, stack, { selected = false, accent = '#ffffff', keyLab
     const it = ITEMS[stack.key];
     if (it.rarity !== 'common') { ctx.fillStyle = RARITY[it.rarity]; ctx.fillRect(x + s * 0.2, y + s - 5, s * 0.6, 2); }
     drawItemIcon(stack.key, x + s / 2, y + s / 2, s / 58);
-    if (maxStack(stack.key) > 1) {
+    if (count && maxStack(stack.key) > 1) {
       ctx.font = `800 ${Math.round(s * 0.27)}px system-ui, sans-serif`; ctx.textAlign = 'right';
       ctx.lineWidth = 4; ctx.strokeStyle = INK; ctx.lineJoin = 'round'; ctx.fillStyle = '#fff';
       ctx.strokeText(stack.n, x + s - 5, y + s - 6); ctx.fillText(stack.n, x + s - 5, y + s - 6);
@@ -1776,10 +1913,11 @@ function drawHotbars() {
 
 // The pause screen: each runner's inventory in its own half of the screen, hotbar on top, bag below.
 function menuLayout() {
-  const S = Math.round(Math.max(34, Math.min(64, (W / 2 - 100) / (BAG_COLS + 0.6), (H - 280) / 5.4))), G = Math.round(S * 0.16);
+  // panels shrink to leave room for the shop column in the middle
+  const S = Math.round(Math.max(34, Math.min(64, (W / 2 - shopWidth() - 68) / (BAG_COLS * 1.12), (H - 280) / 5.4))), G = Math.round(S * 0.16);
   const rowW = n => n * S + (n - 1) * G, top = Math.max(90, H * 0.16);
   return [-1, 1].map(side => {
-    const cx = side < 0 ? W / 4 : W * 3 / 4, slots = [];
+    const cx = W / 2 + side * (shopWidth() / 2 + 16 + (rowW(BAG_COLS) + 44) / 2), slots = [];
     const hotY = top + 92, bagY = hotY + S + 44;
     for (let i = 0; i < HOTBAR; i++) slots.push({ side, i, x: cx - rowW(HOTBAR) / 2 + i * (S + G), y: hotY, s: S });
     for (let j = 0; j < BAG; j++)
@@ -1792,13 +1930,88 @@ function menuSlotAt(px, py) {
   for (const p of menuLayout()) for (const s of p.slots) if (inRect(px, py, s)) return { side: s.side, i: s.i };
   return null;
 }
+// ---------- Shop ----------
+// Sits between the two inventories. Gold comes out of the wallet (shared, kept between runs);
+// each item has a buy button for each runner, and goes into that runner's inventory.
+const SHOP = [{ key: 'grenade', price: 6 }, { key: 'bandage', price: 10 }, { key: 'obliterator', price: 1000 }];
+const shopWidth = () => Math.max(200, Math.min(300, W * 0.22));
+function shopLayout() {
+  const w = shopWidth(), x = W / 2 - w / 2, top = Math.max(90, H * 0.16), rowH = 74, icon = 50;
+  const rows = SHOP.map((e, i) => {
+    const y = top + 82 + i * (rowH + 8), bx = x + 12 + icon + 10, bw = (x + w - 12 - bx - 6) / 2;
+    return { ...e, x: x + 8, y, w: w - 16, h: rowH, icon: { x: x + 12, y: y + (rowH - icon) / 2, s: icon },
+             buy: [-1, 1].map((side, j) => ({ side, x: bx + j * (bw + 6), y: y + 40, w: bw, h: 26 })) };
+  });
+  return { x, top, w, h: menuLayout()[0].box.h, rows };
+}
+const inBox = (px, py, b) => px >= b.x && px < b.x + b.w && py >= b.y && py < b.y + b.h;
+function shopButtonAt(px, py) {
+  for (const row of shopLayout().rows) for (const b of row.buy) if (inBox(px, py, b)) return { row, side: b.side };
+  return null;
+}
+const shopRowAt = (px, py) => shopLayout().rows.find(row => inBox(px, py, row));
+const shopNote = (text, color) => { menu.note = { text, color, at: performance.now() }; };
+function buy(e, side) {
+  const it = ITEMS[e.key], name = RUNNER_NAMES[side];
+  if (wallet < e.price) return shopNote('Not enough gold', '#ff6b6b');
+  if (!addItem(laneFor(side).body, e.key)) return shopNote(`${name}'s inventory is full`, '#ff6b6b');
+  wallet -= e.price; saveWallet();
+  shopNote(`${name} got: ${it.name}`, RARITY[it.rarity]);
+}
+function drawCoin(x, y, r = 10) {
+  ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ffd23f'; ctx.beginPath(); ctx.arc(x, y, r * 0.75, 0, Math.PI * 2); ctx.fill();
+}
+function drawShop() {
+  const L = shopLayout(), cx = L.x + L.w / 2, hover = shopButtonAt(mouse.x, mouse.y);
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.04)'; ctx.strokeStyle = '#ffd23f'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(L.x, L.top, L.w, L.h, 14); ctx.fill(); ctx.globalAlpha = 0.45; ctx.stroke(); ctx.globalAlpha = 1;
+  ctx.textAlign = 'center'; ctx.fillStyle = '#ffd23f'; ctx.font = '800 22px system-ui, sans-serif';
+  ctx.fillText('SHOP', cx, L.top + 36);
+  ctx.font = '700 16px system-ui, sans-serif';
+  const gold = String(wallet), gw = ctx.measureText(gold).width;
+  drawCoin(cx - (gw + 22) / 2 + 8, L.top + 55, 8);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.fillText(gold, cx - (gw + 22) / 2 + 22, L.top + 61);
+  for (const row of L.rows) {
+    const it = ITEMS[row.key], afford = wallet >= row.price;
+    ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.beginPath(); ctx.roundRect(row.x, row.y, row.w, row.h, 10); ctx.fill();
+    drawSlot(row.icon.x, row.icon.y, row.icon.s, { key: row.key, n: 1 }, { count: false });
+    const tx = row.buy[0].x;
+    ctx.textAlign = 'left'; ctx.font = '700 15px system-ui, sans-serif'; ctx.fillStyle = RARITY[it.rarity];
+    ctx.fillText(it.name, tx, row.y + 22);
+    ctx.font = '700 14px system-ui, sans-serif'; ctx.fillStyle = afford ? '#ffd23f' : '#ff6b6b';
+    drawCoin(tx + 6, row.y + 30, 6);
+    ctx.fillStyle = afford ? '#ffd23f' : '#ff6b6b'; ctx.fillText(row.price, tx + 16, row.y + 35);
+    // one buy button per runner, in that runner's color (left button: left runner)
+    for (const b of row.buy) {
+      const accent = SKIES[b.side].accent, hot = hover && hover.row.key === row.key && hover.side === b.side;
+      ctx.globalAlpha = afford ? 1 : 0.35;
+      ctx.fillStyle = hot ? accent : 'rgba(255,255,255,0.08)'; ctx.strokeStyle = accent; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 6); ctx.fill(); ctx.stroke();
+      ctx.textAlign = 'center'; ctx.font = '700 13px system-ui, sans-serif'; ctx.fillStyle = hot ? INK : accent;
+      ctx.fillText(b.side < 0 ? '◀ Buy' : 'Buy ▶', b.x + b.w / 2, b.y + 17);
+      ctx.globalAlpha = 1;
+    }
+  }
+  // what just happened (bought, or why not)
+  const n = menu.note, age = n ? performance.now() - n.at : Infinity;
+  if (age < 2200) {
+    ctx.globalAlpha = Math.min(1, (2200 - age) / 400); ctx.textAlign = 'center';
+    ctx.font = '700 14px system-ui, sans-serif'; ctx.fillStyle = n.color;
+    for (const [i, l] of wrapText(n.text, L.w - 24).entries()) ctx.fillText(l, cx, L.top + L.h - 30 + i * 18);
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+}
+
 function drawInventory() {
   ctx.save();
   ctx.fillStyle = 'rgba(8,6,12,0.8)'; ctx.fillRect(0, 0, W, H);
   ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
   ctx.font = '900 40px system-ui, sans-serif'; ctx.fillText('PAUSED', W / 2, Math.max(50, H * 0.16 - 34));
   ctx.font = '500 15px system-ui, sans-serif'; ctx.globalAlpha = 0.6;
-  ctx.fillText('Esc to resume   ·   drag items to organize   ·   click a hotbar slot to hold it', W / 2, Math.max(50, H * 0.16 - 34) + 26);
+  ctx.fillText('Esc to resume   ·   drag items to organize   ·   click a hotbar slot to hold it   ·   buy with ◀ / ▶ to pick who gets it', W / 2, Math.max(50, H * 0.16 - 34) + 26);
   ctx.globalAlpha = 1;
   const layout = menuLayout();
   for (const p of layout) {
@@ -1822,6 +2035,7 @@ function drawInventory() {
       drawSlot(s.x, s.y, s.s, r.inv[s.i], { selected: s.i === r.slot, accent, keyLabel: s.i < HOTBAR ? hotkey(p.side, s.i) : null, lifted });
     }
   }
+  drawShop();
   if (menu.drag) {  // the item being dragged follows the cursor
     const st = laneFor(menu.drag.side).body.inv[menu.drag.i];
     if (st) drawItemIcon(st.key, mouse.x, mouse.y, layout[0].slots[0].s / 52);
@@ -1829,6 +2043,7 @@ function drawInventory() {
     const h = menuSlotAt(mouse.x, mouse.y), st = h && laneFor(h.side).body.inv[h.i];
     if (st) drawTooltip(ITEMS[st.key], st);
     else if (h && h.i < HOTBAR) drawTooltip(PUNCH, null);
+    else if (!shopButtonAt(mouse.x, mouse.y)) { const row = shopRowAt(mouse.x, mouse.y); if (row) drawTooltip(ITEMS[row.key], null, row.price); }
   }
   ctx.restore();
 }
@@ -1845,16 +2060,21 @@ function wrapText(text, maxW) {
 }
 const cap = s => s[0].toUpperCase() + s.slice(1);
 // Hover tooltip next to the cursor: name, type, stats, then the flavor text.
-function drawTooltip(it, stack) {
-  const type = it.throwSpeed ? 'Thrown weapon' : it.melee ? 'Melee weapon' : it.type || 'Item';
+function drawTooltip(it, stack, price = 0) {
+  const type = it.throwSpeed ? 'Thrown weapon' : it.beam ? 'Laser weapon' : it.melee ? 'Melee weapon' : it.type || 'Item';
   const rows = [[it.name, '800 18px', RARITY[it.rarity]], [`${type}  ·  ${cap(it.rarity)}`, '600 13px', 'rgba(255,255,255,0.5)']];
   if (it.min !== undefined) {
     rows.push(['', '6px'],
-              [`${it.min}-${it.max} damage`, '600 15px', '#fff'],
+              [`${it.min === it.max ? it.min : it.min + '-' + it.max} damage${it.aoe ? ' (area)' : ''}`, '600 15px', '#fff'],
               [`${cap(it.attackSpeed)} attack speed (${ATTACK_SPEED[it.attackSpeed]}/s)`, '600 15px', '#fff'],
-              [`${Math.round(it.critChance * 100)}% crit chance  ·  x${it.critMult} crit damage`, '600 15px', '#fff']);
+              ...(it.critChance ? [[`${Math.round(it.critChance * 100)}% crit chance  ·  x${it.critMult} crit damage`, '600 15px', '#fff']] : []));
     if (it.range) rows.push([`${it.range} reach`, '600 15px', '#fff']);
+    if (it.aoe) rows.push([`${it.aoe} blast radius (can hit you too)`, '600 15px', '#fff'], ['Explodes on the 2nd bounce or on contact', '600 15px', '#fff']);
+    if (it.beam) rows.push(['Pierces everything in its path', '600 15px', '#fff']);
+    if (it.auto) rows.push(['Hold the mouse to keep firing', '600 15px', '#fff']);
   }
+  if (it.heal) rows.push(['', '6px'], [`Restores ${it.heal} life when used`, '600 15px', '#fff']);
+  if (price) rows.push(['', '6px'], [`Price: ${price} gold`, '700 15px', wallet >= price ? '#ffd23f' : '#ff6b6b']);
   if (stack && maxStack(stack.key) > 1) rows.push([`Stack: ${stack.n} / ${maxStack(stack.key)}`, '600 13px', 'rgba(255,255,255,0.5)']);
   if (it.desc) {
     rows.push(['', '6px']);
@@ -1966,7 +2186,7 @@ function draw() {
     ctx.fillText('1 2 3  left hotbar    4 5 6  right hotbar    Esc  pause / inventory', W / 2, H * 0.55 + 32);
     ctx.fillText('Both runners copy your every move. Survive both worlds.', W / 2, H * 0.55 + 64);
     ctx.globalAlpha = 0.5;
-    ctx.fillText('Testing:  7 enemies   8 platform   9 throwers   0 boss   - club   R restart', W / 2, H * 0.55 + 96);
+    ctx.fillText('Testing:  7 enemies   8 platform   9 throwers   0 boss   - club   = +1000 gold   R restart', W / 2, H * 0.55 + 96);
     ctx.globalAlpha = 0.5 + 0.5 * Math.sin(performance.now() / 300);
     ctx.fillText(game.state === 'over' ? 'Space or click to retry' : 'Space or click to start', W / 2, H * 0.55 + 140);
     ctx.globalAlpha = 1;
