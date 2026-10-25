@@ -55,6 +55,7 @@ window.addEventListener('keydown', e => {
     keys[k] = true; return;
   }
   if ((k === 'w' || k === ' ') && !keys[k]) jumpPressed = true;
+  if (k === 'e' && !keys[k]) enterOutpost();
   if ((k === ' ' || k === 'enter') && game.state !== 'play') startGame();
   if (game.state === 'play' && !keys[k]) {
     // hotbars: 1 2 3 pick the left runner's slot, 4 5 6 the right runner's
@@ -492,7 +493,8 @@ function startGame() {
   game.biome = null; game.nextBiome = between(BIOME.first);
   outpost = null; game.checkpoint = 0; game.nextCheckpoint = CHECKPOINT.every;
   game.state = 'play'; setPaused(false);
-  openOutpost(0);  // every run starts at checkpoint 0's shop
+  // every run starts just before checkpoint 0's shop (go in with E, or run on by)
+  startOutpost(0); outpost.d = player.off + CHECKPOINT.halfW * CHECKPOINT.doorAt + 520;
 }
 
 function makeHills() {
@@ -932,9 +934,9 @@ function update(dt) {
 
   // Movement: A/D move both runners back/forward along their lanes (mirrored).
   const walking = strolling();
-  if (outpost && outpost.state === 'stroll') jumpPressed = punchPressed = false;
+  if (walking) jumpPressed = punchPressed = false;
   const move = frozen || walking ? 0 : (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
-  player.moving = move !== 0 || (walking && outpost.state === 'stroll');
+  player.moving = move !== 0 || walking;
   // ease into a slight lean: forward when pushing ahead, back when braking
   player.tilt += ((move > 0 ? 0.20 : move < 0 ? -0.20 : 0) - player.tilt) * Math.min(1, dt * 7);
   if (walking) {}  // (the shop walks them in; see updateOutpost)
@@ -1574,17 +1576,17 @@ function maybeStartBoss(dt) {
 
 // ---------- Checkpoint shops ----------
 // Every CHECKPOINT.every of distance (and at the very start of a run) the runners reach a shop that
-// straddles the mirror seam the way Gronk does, so each runner walks up to its own half. New obstacles
-// stop, the shop slides into view, the world brakes as it reaches the seam (pulling the runners
-// forward), and they stroll the last bit to their door. Inside is the shop screen: buying and selling,
+// comes out of the mirror seam into both worlds. New obstacles stop while it rolls past, and it's
+// optional: press E while your door is close and the runners pull up and walk in; otherwise just run
+// on by (passing it still counts as reaching that checkpoint). Inside is the shop screen: buying and selling,
 // their inventories, travel to any checkpoint reached before, and (later) special offers.
 const CHECKPOINT = {
   every: 10000,       // px between checkpoints (1000 m)
   halfW: 230,         // half the building's width; it's centered on the seam
   doorAt: 0.5,        // how far out from the seam each door is (fraction of halfW)
-  brake: 300,         // px of braking on the way in
-  stroll: 110,        // px the runners walk on their own at the end
-  walk: 115,          // their strolling speed (px/s)
+  reach: [-90, 220],  // E works while a runner's door is this far behind / ahead of them (px)
+  brake: 900,         // how hard the world stops when you go in (px/s per s)
+  walk: 260,          // how fast they walk to the door (px/s)
   walkOut: 1.6,       // s to go from standing to full running speed on the way out
 };
 // Each checkpoint's shop looks different (they take turns). `img` is optional: the path of a PNG to draw
@@ -1613,7 +1615,7 @@ function startOutpost(k) {
   for (const lane of lanes) for (const o of lane.obs) d = Math.max(d, o.d + (o.len || 0) / 2 + CHECKPOINT.halfW + 150);
   if (game.biome && game.biome.start - distance > W / 2) game.biome = null;  // (only the debug key starts one near a biome)
   if (game.biome) d = Math.max(d, game.biome.end - distance + CHECKPOINT.halfW + 150);
-  outpost = { k, state: 'approach', t: 0, d, v: speed, v0: speed, off0: null };
+  outpost = { k, state: 'pass', t: 0, d, v: speed, reached: false };
 }
 // Called every frame outside a shop: one is due every CHECKPOINT.every, but waits for Gronk or a tunnel/cave to be over.
 function maybeStartOutpost() {
@@ -1622,7 +1624,7 @@ function maybeStartOutpost() {
 }
 // Standing at a shop's door with the shop screen open (the start of a run, or after travelling).
 function openOutpost(k) {
-  outpost = { k, state: 'open', t: 0, d: W / 2, v: 0, v0: 0, off0: 0 };
+  outpost = { k, state: 'open', t: 0, d: W / 2, v: 0, reached: true };
   player.off = doorD();
   reachCheckpoint(k);
   openShopScreen();
@@ -1644,43 +1646,66 @@ function travelTo(k) {
   openOutpost(k);
   shopNote(`Welcome to ${shopStyle(k).name}`, shopStyle(k).accent);
 }
+// Where a shop's door (the one on each runner's side) is right now, in lane distance.
+const doorOf = o => o.d - CHECKPOINT.halfW * CHECKPOINT.doorAt;
+// Shops are optional: one rolls past like the scenery, and while a door is close you can press E to go in.
+const canEnter = () => !!outpost && outpost.state === 'pass' && !game.paused &&
+  doorOf(outpost) - player.off > CHECKPOINT.reach[0] && doorOf(outpost) - player.off < CHECKPOINT.reach[1];
+function enterOutpost() {
+  if (!canEnter()) return;
+  outpost.state = 'enter'; outpost.t = 0;
+  // anything out there that could hurt them is gone; loot stays (and flies to them)
+  for (const lane of lanes) lane.obs = lane.obs.filter(x => x.type === 'coin' || x.type === 'item' || x.type === 'health');
+}
 function updateOutpost(dt, gy) {
   const o = outpost;
   o.t += dt;
-  if (o.state === 'approach') {
+  // passing the door counts as reaching the checkpoint, whether you go in or not
+  if (!o.reached && doorOf(o) - player.off < CHECKPOINT.reach[1]) { o.reached = true; reachCheckpoint(o.k); }
+  if (o.state === 'pass') {
+    o.v = runSpeed();
     o.d -= speed * dt;
-    const left = o.d - W / 2;
-    if (left > CHECKPOINT.brake) { o.v = o.v0 = runSpeed(); return; }
-    // braking: the world slows to a stop as the shop reaches the seam, while the runners carry on
-    // forward, so it feels like they slow down rather than the ground stopping under them
-    if (o.off0 === null) o.off0 = player.off;
-    const k = 1 - Math.max(0, left) / CHECKPOINT.brake, to = doorD() - CHECKPOINT.stroll;
-    o.v = o.v0 * Math.sqrt(Math.max(0, left) / CHECKPOINT.brake);
-    player.off = o.off0 + (Math.max(o.off0, to) - o.off0) * smooth01(k);
-    if (left <= 0.5 || o.v < 4) {
-      o.d = W / 2; o.v = 0; o.state = 'stroll'; o.t = 0;
-      reachCheckpoint(o.k);
-      // anything still out there that could hurt them is gone; loot stays (and flies to them)
-      for (const lane of lanes) lane.obs = lane.obs.filter(x => x.type === 'coin' || x.type === 'item' || x.type === 'health');
-    }
-  } else if (o.state === 'stroll') {
+    if (o.d + CHECKPOINT.halfW < -60) leaveOutpost();
+  } else if (o.state === 'enter') {
+    // the world pulls up and they walk to their door (back a little, if they'd run past it)
     magnetLoot(dt, gy);
-    player.off = Math.min(doorD(), player.off + CHECKPOINT.walk * dt);
-    if (player.off >= doorD() && o.t > 0.25) { o.state = 'open'; openShopScreen(); }
+    o.v = Math.max(0, o.v - CHECKPOINT.brake * dt);
+    o.d -= speed * dt;
+    const to = Math.max(60, doorOf(o)), step = CHECKPOINT.walk * dt;
+    player.off += Math.max(-step, Math.min(step, to - player.off));
+    if (o.v === 0 && Math.abs(to - player.off) < 1) { o.state = 'open'; openShopScreen(); }
   } else if (o.state === 'exit') {
     // off they go: walking, then running, and the shop scrolls away behind them
     const k = Math.min(1, o.t / CHECKPOINT.walkOut);
     o.v = runSpeed() * k * k;
     o.d -= speed * dt;
-    if (o.d + CHECKPOINT.halfW < -60) {
-      outpost = null;
-      nextBeat = 300; nextPlatform = 800; game.nextBiome = Math.max(game.nextBiome, distance + BIOME.gap[0] / 2);
-    }
+    if (o.d + CHECKPOINT.halfW < -60) leaveOutpost();
   }
 }
-// The runners walk on their own while braking for a shop and strolling up to it.
-const strolling = () => !!outpost && (outpost.state === 'stroll' || (outpost.state === 'approach' && outpost.off0 !== null));
+function leaveOutpost() {
+  outpost = null;
+  nextBeat = 300; nextPlatform = 800; game.nextBiome = Math.max(game.nextBiome, distance + BIOME.gap[0] / 2);
+}
+// The runners walk on their own while going into a shop.
+const strolling = () => !!outpost && outpost.state === 'enter';
 
+// "Press E to enter" over each runner while their door is close.
+function drawEnterPrompt() {
+  const st = shopStyle(outpost.k), gy = groundY(), pulse = 1 + Math.sin(time * 6) * 0.05;
+  for (const lane of lanes) {
+    ctx.save(); ctx.font = '800 16px system-ui, sans-serif'; ctx.textAlign = 'center';
+    const label = 'to enter ' + st.name, w = ctx.measureText(label).width + 52;
+    // over the runner, but kept inside their half of the screen
+    const off = Math.max(w / 2 + 10, Math.min(W / 2 - w / 2 - 10, player.off));
+    ctx.translate(lane.side < 0 ? off : W - off, gy + lane.body.y - 150); ctx.scale(pulse, pulse);
+    ctx.fillStyle = 'rgba(10,8,14,0.85)'; ctx.strokeStyle = st.accent; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(-w / 2, -18, w, 36, 10); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = st.accent; ctx.beginPath(); ctx.roundRect(-w / 2 + 8, -12, 24, 24, 5); ctx.fill();
+    ctx.fillStyle = INK; ctx.fillText('E', -w / 2 + 20, 6);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.fillText(label, -w / 2 + 40, 6);
+    ctx.restore();
+  }
+}
 // A PNG design for a shop, once it's loaded (null until then, or if there isn't one).
 function shopImage(st) {
   if (!st.img) return null;
@@ -2781,11 +2806,9 @@ function drawLane(lane, sky) {
   for (let x = -(distance % 60); x < half; x += 60) ctx.fillRect(x, gy + 14 + (inView ? groundLift(lane, x + 13) : 0), 26, 3);
   if (boss) drawLair(boss.gateD, boss.exitD, gy, half);
   if (outpost && outpost.d - CHECKPOINT.halfW < half + 40) {  // drawn unmirrored, so its sign reads right on both sides
-    // coming in, each side only has its own half of the building, so it reads as one shop split by the
-    // seam; on the way out each side gets the whole thing, so it passes by intact behind both runners
+    // each side gets the whole building, so it passes by intact behind both runners
     const cx = lane.side < 0 ? outpost.d : W - outpost.d;
     ctx.save(); if (lane.side > 0) { ctx.translate(W, 0); ctx.scale(-1, 1); }
-    if (outpost.state !== 'exit') { ctx.beginPath(); ctx.rect(lane.side < 0 ? cx - CHECKPOINT.halfW - 80 : cx, 0, CHECKPOINT.halfW + 80, H); ctx.clip(); }
     drawShopBuilding(cx, gy, shopStyle(outpost.k), outpost.k);
     ctx.restore();
   }
@@ -3775,6 +3798,7 @@ function draw() {
     }
 
     drawHotbars();
+    if (canEnter()) drawEnterPrompt();
     drawBossUI();
   }
   if (debug.god || debug.timeScale !== 1) {  // so a cheat never gets left on by accident
