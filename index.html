@@ -282,7 +282,7 @@ const PUNCH = { name: 'Fists', rarity: 'common', melee: true, anim: 'punch', att
 //   equip       gear: the equipment slot it's worn in ('head', 'chest', 'feet' or 'accessory')
 //   stats       what wearing it adds; every equipped piece's stats are summed (see gearStat)
 //   worn        how it's drawn on a body that wears it (a WORN entry), so runners and enemies show it
-//   value       base sell price in gold for one of it, before the rarity and checkpoint multipliers (see sellValue).
+//   value       base sell price in gold for one of it, before the rarity multiplier (see sellValue).
 //               Shop items skip this and sell back for SELL.shopCut of their shop price instead.
 const RARITY = { common: '#ffffff', uncommon: '#5bd16a', rare: '#4da6ff', epic: '#c77dff', legendary: '#ff9f1c' };
 const ITEMS = {
@@ -3091,17 +3091,16 @@ function buy(e, side) {
 // The trash and the sell slot each hold one stack. Putting a stack in pays for it (selling) right
 // away, but it stays there, so it can be dragged back out (giving the gold back) until something
 // else goes in, the shop is closed, or the inventory is closed. Only its owner can take it back.
-// What an item sells for: its `value` x the rarity multiplier x the checkpoint multiplier, or for
-// shop items, SELL.shopCut of what the shop charges (so the Obliterator sells back for 700).
+// What an item sells for: its `value` x the rarity multiplier, or for shop items, SELL.shopCut of
+// what the shop charges (so the Obliterator sells back for 700). Prices don't grow with progress;
+// later zones just hand out better items that are worth more.
 const SELL = {
   rarity: { common: 1, uncommon: 1.5, rare: 2.5, epic: 4, legendary: 8 },
   shopCut: 0.7,
-  checkpointBonus: 0.25,  // +25% sell value per checkpoint reached
 };
-const checkpointLevel = () => game.checkpoint || 0;  // (no checkpoints yet, so this is 0 and the multiplier is 1)
 function sellValue(key, n = 1) {
   const shop = SHOP.find(e => e.key === key), it = ITEMS[key];
-  const each = shop ? shop.price * SELL.shopCut : (it.value || 0) * SELL.rarity[it.rarity] * (1 + SELL.checkpointBonus * checkpointLevel());
+  const each = shop ? shop.price * SELL.shopCut : (it.value || 0) * SELL.rarity[it.rarity];
   return roundGold(each * n);
 }
 const isBin = i => i === 'trash' || i === 'sell';
