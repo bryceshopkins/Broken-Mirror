@@ -1011,9 +1011,11 @@ function update(dt) {
   }
   player.phase += dt * (speed + (player.moving ? 220 : 0)) / 32;
 
+  const crossing = [];  // shots going through the mirror this frame (see canCross)
   for (const lane of lanes) {
     lane.hills.forEach(h => { h.x -= speed * 0.25 * dt; if (h.x < -300) h.x += 8 * 220; });
     for (const o of lane.obs) {
+      if (canCross(o) && o.d > W / 2) { o.dead = true; crossing.push([lane, o]); continue; }
       if (o.type === 'slash') { o.t += dt; if (o.t > 0.35) o.dead = true; continue; }
       if (o.type === 'boom' || o.type === 'spark') { o.t += dt; o.d -= speed * dt; if (o.t > (o.type === 'boom' ? 0.4 : 0.12)) o.dead = true; continue; }
       if (o.type === 'ripple') { o.t += dt; o.d -= speed * dt; if (o.t > o.life) o.dead = true; continue; }
@@ -1090,7 +1092,7 @@ function update(dt) {
         if (o.friendly) {  // your stars (thrown or deflected) hit the first enemy in their path
           const e = lane.obs.find(e => e.type === 'enemy' && !e.dead && overlaps(b, obstacleBox(e, gy)));
           if (e) { o.dead = true; hitEnemy(e, lane, gy, ITEMS.shuriken); }
-          if (o.d > W / 2 + 40 || o.d < -40 || gy + o.y < -40 || gy + o.y > H + 40) o.dead = true;
+          if ((o.d > W / 2 + 40 && !canCross(o)) || o.d < -40 || gy + o.y < -40 || gy + o.y > H + 40) o.dead = true;
           continue;
         }
         // a punch knocks an incoming star straight back the way it came
@@ -1142,6 +1144,8 @@ function update(dt) {
     if (boss) bossVsRunner(lane, r, pb, hitting, gy);
     lane.obs = lane.obs.filter(o => o.d + (o.len || 0) / 2 > -60 && !o.dead);
   }
+  // through the mirror everything's turned around: same spot on screen, heading the other way in lane space
+  for (const [lane, o] of crossing) lanes[lane === lanes[0] ? 1 : 0].obs.push({ ...o, d: W - o.d, vd: -o.vd, crossed: true, dead: false });
   jumpPressed = punchPressed = false;
 
   if (!boss && !outpost) {
@@ -1461,7 +1465,7 @@ function updateBolt(lane, o, dt, gy) {
     lane.obs.push({ type: 'spark', d: hx, y: hy - gy, a: Math.atan2(o.vy, o.vd), t: 0, dead: false, hit: false });
     return;
   }
-  if (x1 > W / 2 + 60 || x1 < -60 || y1 < -60 || y1 > H + 60) o.dead = true;
+  if ((x1 > W / 2 + 60 && !canCross(o)) || x1 < -60 || y1 < -60 || y1 > H + 60) o.dead = true;
 }
 
 // Stars fly freely: yours where you aimed, theirs toward you (a bit faster than the ground). Like the
@@ -1502,6 +1506,12 @@ function shatterStar(lane, o, x, y) {
   lane.obs.push({ type: 'spark', d: x, y: y - groundY(), a: Math.atan2(vy, vx), glow: tint || '#ffffff', t: 0, dead: false, hit: false });
 }
 
+// In Gronk's arena your shots can go through the mirror into the other world, so one runner can keep
+// hitting him while he's off chasing the other. Once each, and a grenade that crossed never hurts the
+// runner over there (only its thrower can catch their own blast).
+const seamOpen = () => !!boss && boss.alive && boss.state !== 'approach' && boss.state !== 'exit';
+const canCross = o => seamOpen() && !o.crossed && (o.type === 'bolt' || o.type === 'grenade' || (o.type === 'star' && o.friendly));
+
 // Grenades fly in an arc and bounce off whatever floor is under them; the second bounce sets them off.
 function updateGrenade(lane, o, dt, gy) {
   o.t += dt; o.vy += 1400 * dt; o.y += o.vy * dt; o.d += o.vd * dt;  // carried along at the runner's pace, like shurikens
@@ -1513,7 +1523,7 @@ function updateGrenade(lane, o, dt, gy) {
     o.y = rest - 8; o.vy *= -0.55; o.vd *= 0.7;
     burst(o.d, gy + o.y + 8, 4, 0.3, lane.side, '#ffffff');
   }
-  if (o.d > W / 2 + 40 || o.d < -40 || gy + o.y > H + 40) o.dead = true;
+  if ((o.d > W / 2 + 40 && !canCross(o)) || o.d < -40 || gy + o.y > H + 40) o.dead = true;
 }
 // Blast damage to everything in range, the boss included. Too close and it gets the thrower too.
 function explode(lane, o, gy) {
@@ -1530,7 +1540,7 @@ function explode(lane, o, gy) {
   }
   // the closer to the blast, the more it hurts (up to the grenade's full damage)
   const near = Math.hypot(player.off - cx, gy + r.y - 35 - cy);
-  if (r.invuln <= 0 && near < R * 0.75) hurtRunner(lane, Math.round(it.min * (1 - near / R)), gy);
+  if (!o.crossed && r.invuln <= 0 && near < R * 0.75) hurtRunner(lane, Math.round(it.min * (1 - near / R)), gy);
   lane.obs.push({ type: 'boom', d: cx, y: o.y, r: R, t: 0, dead: false, hit: false });
   burst(cx, cy, 30, 1.4, lane.side, '#ffb347');
   burst(cx, cy, 14, 1.0, lane.side, '#ffffff');
