@@ -142,11 +142,11 @@ const BRUTE = {
 const BRUTE_PATTERNS = [[['brute'], []], [['brute'], ['enemy', 200]], [['brute'], ['thrower', 150]], [['brute'], ['block', 120]]];
 
 function startGame() {
-  player = { off: 120, coins: 0, invuln: 0, lives: 3, phase: 0 };
+  player = { off: 120, coins: 0, invuln: 0, lives: 3, phase: 0, tilt: 0 };
   // Inputs are shared, but each runner has its own body so they can stand on different planes,
   // and its own inventory so they can carry different weapons.
   const body = () => ({ y: 0, vy: 0, grounded: true, sliding: false, dropT: 0, ammo: { shuriken: 0 },
-                       attack: 'punch', swingT: 99, attackCd: 0, queued: 0, hits: new Set() });
+                       attack: 'punch', swingT: 99, punchAlt: false, aimA: Math.PI / 2, attackCd: 0, queued: 0, hits: new Set() });
   lanes = [{ side: -1, obs: [], hills: makeHills(), body: body() },
            { side: 1, obs: [], hills: makeHills(), body: body() }];
   particles = []; popups = []; labels = []; impact = null;
@@ -405,6 +405,8 @@ function update(dt) {
   // Movement: A/D move both runners back/forward along their lanes (mirrored).
   const move = frozen ? 0 : (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
   player.moving = move !== 0;
+  // ease into a slight lean: forward when pushing ahead, back when braking
+  player.tilt += ((move > 0 ? 0.20 : move < 0 ? -0.20 : 0) - player.tilt) * Math.min(1, dt * 7);
   if (boss && boss.state !== 'approach' && boss.state !== 'exit') {
     // in the arena you can walk right up to the boss, but not through him
     const limit = boss.state === 'intro' || !boss.alive ? W / 2 - 40 : Math.min(boss.x, W - boss.x) - 48;
@@ -441,10 +443,14 @@ function update(dt) {
         const aim = { d: Math.min(mouse.x, W - mouse.x), y: mouse.y - gy };
         const dx = aim.d - hand.d, dy = aim.y - hand.y, len = Math.hypot(dx, dy) || 1;
         const v = ITEMS.shuriken.throwSpeed;
+        r.aimA = Math.atan2(dx, dy);  // the throwing arm follows through along this
         lane.obs.push({ type: 'star', friendly: true, d: hand.d, y: hand.y, vd: dx / len * v, vy: dy / len * v,
                         t: 0, dead: false, hit: false });
         burst(hand.d, gy + hand.y, 8, 0.5, lane.side);  // release flash
-      } else r.attack = r.weapon || 'punch';  // melee: a weapon if this runner has one, else fists
+      } else {
+        r.attack = r.weapon || 'punch';  // melee: a weapon if this runner has one, else fists
+        if (r.attack === 'punch') r.punchAlt = !r.punchAlt;  // jab, cross, jab...
+      }
       r.swingT = 0; r.hits.clear(); r.attackCd = 1 / ATTACK_SPEED[attackOf(r).attackSpeed];
     }
   }
@@ -1052,10 +1058,10 @@ function limb(x, y, a, len) { const nx = x + Math.sin(a) * len, ny = y + Math.co
 // head, bring it down hard into the ground in front, a beat there, then haul it back onto the shoulder.
 // `reach` is where the arms point (from straight down, + = forward), `a` the club (0 = forward, - = up),
 // `lean` the torso (leaning back to wind up, hunched over the hit).
+const mix = (a, b, t) => a + (b - a) * t;
 const CLUB_REST = [2.5, -2.0, 0.18];  // carried over the shoulder in the front hand
 const CLUB_KEYS = { raised: 0.33, impact: 0.46, lift: 0.68 };  // when (0-1 through the swing) each stage ends
 function clubPose(k) {
-  const mix = (a, b, t) => a + (b - a) * t;
   const at = (t, from, to) => ({ reach: mix(from[0], to[0], t), a: mix(from[1], to[1], t), lean: mix(from[2], to[2], t) });
   const REST = CLUB_REST, RAISED = [3.3, -4.3, -0.1], DOWN = [1.0, 0.95, 0.55], { raised, impact, lift } = CLUB_KEYS;
   if (k < raised) return at(1 - (1 - k / raised) ** 2, REST, RAISED);
@@ -1063,6 +1069,41 @@ function clubPose(k) {
   if (k < lift) return at(0, DOWN, DOWN);
   const t = Math.min(1, (k - lift) / (1 - lift));
   return at(t * t * (3 - 2 * t), DOWN, REST);
+}
+
+// Punch, by how far through it we are (0-1): snap the fist out from the chin, hold a beat, draw it
+// back. Every other punch is the rear hand's cross: it starts from further back by the ribs and is
+// thrown a touch higher with more weight behind it, so it sweeps a longer path.
+// The fist travels in a straight line (offsets from the shoulder) and the arm is solved to follow it.
+const PUNCH_GUARD = [10, 8], PUNCH_FROM = [[12, 10], [0, 15]], PUNCH_OUT = [[27, -1], [27, -5]];
+const smooth = t => t * t * (3 - 2 * t);
+const punchExt = k => k < 0.3 ? 1 - (1 - k / 0.3) ** 3 : k < 0.55 ? 1 : 1 - smooth((k - 0.55) / 0.45);
+function punchFist(k, alt) {
+  const e = punchExt(k), from = PUNCH_FROM[alt ? 1 : 0], out = PUNCH_OUT[alt ? 1 : 0];
+  return [mix(from[0], out[0], e), mix(from[1], out[1], e)];
+}
+// Shuriken toss: an overhand whip from behind the head, over the top and out along the aim, with the
+// wrist lagging until it snaps through. Angles run down from 4 (behind and up) through pi (overhead).
+function tossArm(k, aim) {
+  const e = 1 - (1 - Math.min(1, k / 0.6)) ** 3, a1 = mix(4.0, aim + 0.25, e);
+  return [a1, a1 + 0.9 * (1 - e)];
+}
+const fistAt = ([a1, a2], sx, sy) => [sx + (Math.sin(a1) + Math.sin(a2)) * 14, sy + (Math.cos(a1) + Math.cos(a2)) * 14];
+// A soft white trail along the path a hand took (posAt(k) -> [x, y]) between k0 and k1, thickening
+// toward the hand. With `offsets` it's instead thin speed lines running alongside that path.
+function fistTrail(posAt, k0, k1, alpha, width = 5, offsets = [0]) {
+  if (k1 <= k0) return;
+  const pts = [];
+  for (let i = 0; i <= 8; i++) pts.push(posAt(k0 + (k1 - k0) * i / 8));
+  const [x0, y0] = pts[0], [x1, y1] = pts[8], len = Math.hypot(x1 - x0, y1 - y0) || 1;
+  const nx = -(y1 - y0) / len, ny = (x1 - x0) / len;
+  ctx.save(); ctx.strokeStyle = '#ffffff'; ctx.lineCap = 'round';
+  for (const o of offsets)
+    for (let i = 1; i <= 8; i++) {
+      ctx.globalAlpha = alpha * i / 8; ctx.lineWidth = 1 + width * i / 8;
+      seg(pts[i - 1][0] + nx * o, pts[i - 1][1] + ny * o, pts[i][0] + nx * o, pts[i][1] + ny * o);
+    }
+  ctx.restore();
 }
 
 // Two-bone reach: the shoulder and elbow angles that put a hand at (tx, ty), elbow bent forward/down.
@@ -1076,9 +1117,13 @@ function reachFor(sx, sy, tx, ty, len = 14) {
 }
 
 function drawStick(x, gy, pose) {
-  const { phase, mode, punch = 0, club = null, lean = club ? club.lean : 0.18, streak = true, windup = false, throwing = false, deflect = -1 } = pose;
+  const { phase, mode, punch = -1, alt = false, toss = -1, aim = Math.PI / 2, club = null, lean = club ? club.lean : 0.18,
+          windup = false, throwing = false, deflect = -1 } = pose;
+  let { tilt = 0 } = pose;
+  if (punch >= 0) tilt += punchExt(punch) * (alt ? 0.14 : 0.06);  // the cross rolls the shoulder in
+  if (toss >= 0) tilt += Math.sin(Math.PI * Math.min(1, toss)) * 0.2;  // lean into the throw
   ctx.strokeStyle = INK; ctx.fillStyle = INK; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = 6;
-  let hipY = gy - 34, torsoA = lean, legs, arms;
+  let hipY = gy - 34, torsoA = lean + tilt, legs, arms;
   if (mode === 'slide') {
     hipY = gy - 9; torsoA = -1.15;
     legs = [[1.45, 1.5], [1.25, 1.6]];
@@ -1099,7 +1144,7 @@ function drawStick(x, gy, pose) {
     arms = [[-s * 0.9, -s * 0.9 + 1.4], [s * 0.9, s * 0.9 + 1.4]];
     hipY += Math.abs(Math.cos(phase)) * -3;
   }
-  if (punch > 0) arms[0] = [Math.PI / 2 - 0.05, Math.PI / 2], arms[1] = [-0.6, 0.9];
+  if (toss >= 0) arms[0] = tossArm(toss, aim), arms[1] = [-0.7, -0.3];  // off arm swings back for balance
   if (windup) arms[0] = [-2.5, -1.7];  // throwing arm cocked back behind the head
   if (throwing) arms[0] = [2.1, 1.75], arms[1] = [-0.9, 0.2];  // overhand whip, arm high and forward
   if (deflect >= 0) {  // backhand swat sweeping up from low-front to overhead
@@ -1112,18 +1157,29 @@ function drawStick(x, gy, pose) {
   seg(x, hipY, nx, ny);
   const shX = x + (nx - x) * 0.85, shY = hipY + (ny - hipY) * 0.85;
   let hand = null;
+  if (punch >= 0) {  // punching hand follows its fist; the other stays up at the chin
+    const [fx, fy] = punchFist(punch, alt);
+    arms = [reachFor(shX, shY, shX + fx, shY + fy), reachFor(shX, shY, shX + PUNCH_GUARD[0], shY + PUNCH_GUARD[1])];
+  }
   if (club) {  // swinging: both hands on the handle, one a little further up it; carrying: just the front one
     const gx = shX + Math.sin(club.reach) * 23, gyy = shY + Math.cos(club.reach) * 23;
     arms = [reachFor(shX, shY, gx, gyy),
             club.carry ? arms[1] : reachFor(shX, shY, gx + Math.cos(club.a) * 7, gyy + Math.sin(club.a) * 7)];
   }
+  // the throwing hand drags a soft arc behind it, drawn behind the arm
+  if (toss >= 0) fistTrail(k => fistAt(tossArm(k, aim), shX, shY), Math.max(0, toss - 0.35), Math.min(toss, 0.6), 0.5);
   for (const [a1, a2] of arms) { const e = limb(shX, shY, a1, 14); const h = limb(e[0], e[1], a2, 14); hand = hand || h; }
   if (club) hand = [shX + Math.sin(club.reach) * 23, shY + Math.cos(club.reach) * 23, shX, shY];
   ctx.beginPath(); ctx.arc(nx + Math.sin(Math.PI - torsoA) * 10, ny + Math.cos(Math.PI - torsoA) * 10, 10, 0, Math.PI * 2); ctx.fill();
-  if (punch > 0 && streak) { // fist streak
-    ctx.globalAlpha = Math.min(1, punch * 6) * 0.6; ctx.lineWidth = 3;
-    seg(shX + 10, shY - 4, shX + 52, shY - 2); seg(shX + 10, shY + 4, shX + 48, shY + 3);
-    ctx.globalAlpha = 1;
+  if (punch >= 0) {  // a solid fist with speed lines riding along behind it, then a little pop at full reach
+    const at = k => { const [fx, fy] = punchFist(k, alt); return [shX + fx, shY + fy]; }, f = at(punch);
+    ctx.beginPath(); ctx.arc(f[0], f[1], 4.5, 0, Math.PI * 2); ctx.fill();
+    fistTrail(at, Math.max(0, punch - 0.3), Math.min(punch, 0.3) - 0.03, 0.7, 1.5, [-6, 6]);
+    const t = (punch - 0.26) / 0.25;
+    if (t > 0 && t < 1) {
+      ctx.save(); ctx.strokeStyle = '#ffffff'; ctx.globalAlpha = (1 - t) * 0.45; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(f[0] + 4, f[1], 5 + t * 10, -1.1, 1.1); ctx.stroke(); ctx.restore();
+    }
   }
   return hand;  // where the front hand ended up, for holding things
 }
@@ -1605,8 +1661,9 @@ function drawLane(lane, sky) {
     const club = r.attack === r.weapon && swinging ? clubPose(swingK(r))
                : carrying ? { reach: CLUB_REST[0], a: CLUB_REST[1], lean: CLUB_REST[2], carry: true } : null;
     const hand = drawStick(player.off, gy + r.y, {
-      phase: player.phase, mode, throwing, deflect, club,
-      punch: r.attack === 'punch' && swinging && deflect < 0 ? PUNCH.swing.dur - r.swingT : 0 });
+      phase: player.phase, mode, deflect, club, tilt: player.tilt,
+      toss: throwing && deflect < 0 ? swingK(r) : -1, aim: r.aimA,
+      punch: r.attack === 'punch' && swinging && deflect < 0 ? swingK(r) : -1, alt: r.punchAlt });
     // a runner carrying shurikens holds one, so you can tell at a glance who's armed
     if (r.ammo.shuriken > 0 && !throwing && deflect < 0 && hand) drawShuriken(hand[0], hand[1], time * 3, sky.accent, false, 0.75);
     else if (r.weapon && hand) {
