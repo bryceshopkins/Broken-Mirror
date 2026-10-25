@@ -34,32 +34,24 @@ const keys = {};
 let jumpPressed = false, punchPressed = false;
 window.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
+  // / (or ?) opens the debug menu; while it's open the game is frozen and only debug hotkeys work
+  if (k === '/' || k === '?') { e.preventDefault(); setDebugOpen(!debug.open); return; }
+  if (debug.open) {
+    if (k === 'escape') setDebugOpen(false);
+    else if (!e.repeat) runDebugKey(k, e.shiftKey, true);
+    if (k === ' ') e.preventDefault();
+    return;
+  }
   // Escape freezes the run and opens the inventory; while it's open, nothing else reaches the game
   if (k === 'escape') { if (game.state === 'play') setPaused(!game.paused); return; }
-  if (k === '=' && !keys[k]) { wallet += 1000; saveWallet(); }  // testing: +1000 gold (works in the shop too)
+  if (!keys[k] && runDebugKey(k, e.shiftKey, false)) { keys[k] = true; return; }
   if (game.paused) { keys[k] = true; return; }
   if ((k === 'w' || k === ' ') && !keys[k]) jumpPressed = true;
   if ((k === ' ' || k === 'enter') && game.state !== 'play') startGame();
-  if (k === 'r') startGame();  // restart any time
   if (game.state === 'play' && !keys[k]) {
     // hotbars: 1 2 3 pick the left runner's slot, 4 5 6 the right runner's
     const n = '123456'.indexOf(k);
     if (n >= 0) selectSlot(laneFor(n < HOTBAR ? -1 : 1), n % HOTBAR);
-    // Testing shortcuts
-    if (k === '7') lanes.forEach(l => spawnObstacle(l, 'enemy'));
-    if (k === '8') spawnObstacle(lanes[Math.random() < 0.5 ? 0 : 1], 'platform');
-    if (k === '9') lanes.forEach(l => spawnObstacle(l, 'thrower'));
-    if (k === '0' && !boss) startBoss();
-    if (k === '-') lanes.forEach(l => { if (!l.body.inv.some(s => s && s.key === 'club') && addItem(l.body, 'club')) addLabel(l, 'club'); });
-    if (k === 'b') lanes.forEach(l => spawnObstacle(l, 'brute'));
-    // O: a deep pond with a piranha just ahead of both runners (Shift+O: an ankle-deep puddle)
-    if (k === 'o') lanes.forEach(l => spawnPond(l, player.off + 240, e.shiftKey ? 9 : 62, !e.shiftKey, true));
-    if (k === 'x') lanes.forEach(l => { if (!l.body.inv.some(s => s && s.key === 'axe') && addItem(l.body, 'axe')) addLabel(l, 'axe'); });
-    if (k === 'p' && !game.bossDefeated) {  // skip straight to the post-Gronk run (brutes start showing up)
-      if (boss) { boss = null; lanes.forEach(l => { l.obs = l.obs.filter(o => o.type === 'coin' || o.type === 'item' || o.type === 'health'); }); }
-      game.bossDefeated = true; nextBeat = 300; nextPlatform = 800;
-      popups.push({ x: W / 2, y: 150, vx: 0, vy: -40, text: 'GRONK SKIPPED', word: true, side: -1, life: 1.4, age: 0 });
-    }
   }
   keys[k] = true;
   if (k === ' ') e.preventDefault();
@@ -102,6 +94,125 @@ function setPaused(on) {
   game.paused = on; menu.down = menu.drag = null; mouse.held = false;
   jumpPressed = punchPressed = false;
   canvas.style.cursor = on ? 'default' : '';
+}
+
+// ---------- Debug menu ----------
+// Every testing shortcut lives in DEBUG_KEYS, so the hotkey and the button in the / menu do the same thing.
+// `any`: works outside a run and in the inventory too. `stay`: clicking it keeps the menu open.
+const debug = { open: false, god: false, timeScale: 1, bossLow: false };
+const TIME_STEPS = [0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
+const giveBoth = key => lanes.forEach(l => { if (!l.body.inv.some(s => s && s.key === key) && addItem(l.body, key)) addLabel(l, key); });
+const debugNote = text => popups.push({ x: W / 2, y: 150, vx: 0, vy: -40, text, word: true, side: -1, life: 1.4, age: 0 });
+function setTimeScale(v) { debug.timeScale = v; refreshDebugMenu(); }
+function stepTimeScale(dir) {
+  const i = TIME_STEPS.findIndex(v => v >= debug.timeScale - 1e-6);
+  setTimeScale(TIME_STEPS[Math.max(0, Math.min(TIME_STEPS.length - 1, (i < 0 ? TIME_STEPS.length - 1 : i) + dir))]);
+}
+function skipBoss() {  // straight to the post-Gronk run (brutes start showing up)
+  if (game.bossDefeated) return;
+  if (boss) { boss = null; lanes.forEach(l => { l.obs = l.obs.filter(o => o.type === 'coin' || o.type === 'item' || o.type === 'health'); }); }
+  game.bossDefeated = true; nextBeat = 300; nextPlatform = 800;
+  debugNote('GRONK SKIPPED');
+}
+const DEBUG_KEYS = [
+  { key: 'g', label: 'Invulnerable (god mode)', any: true, stay: true, toggle: () => debug.god,
+    run: () => { debug.god = !debug.god; if (player) debugNote(debug.god ? 'GOD MODE ON' : 'GOD MODE OFF'); } },
+  { key: '[', label: 'Slow down time', any: true, stay: true, run: () => stepTimeScale(-1) },
+  { key: ']', label: 'Speed up time', any: true, stay: true, run: () => stepTimeScale(1) },
+  { key: '\\', label: 'Normal speed', any: true, stay: true, run: () => setTimeScale(1) },
+  { key: '7', label: 'Spawn enemies', run: () => lanes.forEach(l => spawnObstacle(l, 'enemy')) },
+  { key: '8', label: 'Spawn platform', run: () => spawnObstacle(lanes[Math.random() < 0.5 ? 0 : 1], 'platform') },
+  { key: '9', label: 'Spawn throwers', run: () => lanes.forEach(l => spawnObstacle(l, 'thrower')) },
+  { key: 'b', label: 'Spawn brutes', run: () => lanes.forEach(l => spawnObstacle(l, 'brute')) },
+  // O: a deep pond with a piranha just ahead of both runners (Shift+O: an ankle-deep puddle)
+  { key: 'o', label: 'Deep pond + piranha', run: () => lanes.forEach(l => spawnPond(l, player.off + 240, 62, true, true)) },
+  { key: 'o', shift: true, label: 'Shallow puddle', run: () => lanes.forEach(l => spawnPond(l, player.off + 240, 9, false, true)) },
+  { key: '-', label: 'Give club', stay: true, run: () => giveBoth('club') },
+  { key: 'x', label: 'Give battle axe', stay: true, run: () => giveBoth('axe') },
+  { key: '=', label: '+1000 gold', any: true, stay: true, run: () => { wallet += 1000; saveWallet(); } },
+  { key: '0', label: 'Start Gronk (boss)', run: () => { if (!boss && !game.bossDefeated) startBoss(); } },
+  { key: 'p', label: 'Skip Gronk (post-boss run)', run: skipBoss },
+  { key: 'r', label: 'Restart run', any: true, run: () => startGame() },
+];
+// Menu-only extras: jump to a point in the run, or tweak the runners.
+const DEBUG_SKIPS = [
+  { label: 'Fresh run', run: () => startGame() },
+  { label: 'Right before Gronk can show up', run: () => { if (!boss) game.bossDefeated = false; time = Math.max(time, BOSS.after - 3); game.bossCheck = 0; } },
+  { label: 'Gronk fight now', run: () => { if (!boss && !game.bossDefeated) startBoss(); } },
+  { label: 'Gronk fight, nearly dead', run: () => { if (!boss) { game.bossDefeated = false; startBoss(); } debug.bossLow = true; } },
+  { label: 'After Gronk (brutes)', run: skipBoss },
+  { label: 'Late run (+1000 m, top speed)', run: () => { distance += 10000; nextBeat = Math.min(nextBeat, 300); } },
+  { label: 'Full heal', stay: true, run: () => lanes.forEach(l => { l.body.hp = l.body.hpLag = MAX_HP; }) },
+  { label: 'Give The Obliterator', stay: true, run: () => giveBoth('obliterator') },
+];
+// Runs a hotkey's action; returns true if the key was a debug key.
+function runDebugKey(k, shift, fromMenu) {
+  const a = DEBUG_KEYS.find(d => d.key === k && !!d.shift === (k === 'o' && shift)) || DEBUG_KEYS.find(d => d.key === k && !d.shift);
+  if (!a) return false;
+  if (!a.any && (game.state !== 'play' || game.paused) && !fromMenu) return false;
+  doDebug(a);
+  return true;
+}
+function doDebug(a) {
+  if (!a.any || a.label === 'Restart run') {
+    if (game.state !== 'play' && a.label !== 'Fresh run' && a.label !== 'Restart run') startGame();
+    if (game.paused) setPaused(false);
+  }
+  a.run();
+  if (!a.stay && debug.open) setDebugOpen(false);
+  refreshDebugMenu();
+}
+
+// The menu itself is plain HTML over the canvas, so it's easy to click.
+const dbgCss = document.createElement('style');
+dbgCss.textContent = `
+  #dbg { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(8,6,12,0.55); font: 14px system-ui, sans-serif; color: #fff; z-index: 5; }
+  #dbg.open { display: flex; }
+  #dbg .panel { background: #1c1520; border: 2px solid #3a2a40; border-radius: 12px; padding: 18px 20px; width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.5); box-sizing: border-box; }
+  #dbg h2 { margin: 0 0 4px; font-size: 20px; letter-spacing: 0.06em; }
+  #dbg .sub { opacity: 0.6; margin-bottom: 14px; }
+  #dbg h3 { margin: 16px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; color: #ffb347; }
+  #dbg .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; }
+  #dbg button { display: flex; align-items: center; gap: 10px; text-align: left; background: #2a2030; color: #fff; border: 1px solid #44334c; border-radius: 8px; padding: 8px 10px; font: inherit; cursor: pointer; }
+  #dbg button:hover { background: #3a2c42; border-color: #7fd8ff; }
+  #dbg button.on { background: #1f4a2c; border-color: #5bd16a; }
+  #dbg kbd { min-width: 26px; text-align: center; background: #0b0a0f; border: 1px solid #555; border-radius: 5px; padding: 2px 6px; font: 600 12px ui-monospace, monospace; color: #7fd8ff; }
+  #dbg .time { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  #dbg .time button { padding: 6px 10px; }
+  #dbg .time .val { font: 700 18px system-ui, sans-serif; min-width: 64px; }
+`;
+document.head.appendChild(dbgCss);
+const dbgEl = document.createElement('div');
+dbgEl.id = 'dbg';
+document.body.appendChild(dbgEl);
+const keyName = d => (d.shift ? 'Shift+' : '') + (d.key === '\\' ? '\\' : d.key.toUpperCase());
+function buildDebugMenu() {
+  const btn = (d, i, list) => `<button data-list="${list}" data-i="${i}"${d.toggle && d.toggle() ? ' class="on"' : ''}>${d.key ? `<kbd>${keyName(d)}</kbd>` : ''}<span>${d.label}${d.toggle ? (d.toggle() ? ': ON' : ': off') : ''}</span></button>`;
+  const keyed = (from, to) => DEBUG_KEYS.map((d, i) => [d, i]).slice(from, to).map(([d, i]) => btn(d, i, 'k')).join('');
+  dbgEl.innerHTML = `<div class="panel">
+    <h2>DEBUG MENU</h2><div class="sub">Game is frozen while this is open. <kbd>/</kbd> or <kbd>Esc</kbd> to close. Every hotkey also works during a run.</div>
+    <h3>Cheats</h3><div class="grid">${keyed(0, 1)}${btn(DEBUG_SKIPS[6], 6, 's')}${btn(DEBUG_SKIPS[7], 7, 's')}${keyed(12, 13)}</div>
+    <h3>Time</h3><div class="time">${keyed(1, 2)}<span class="val">${debug.timeScale}x</span>${keyed(2, 3)}
+      ${TIME_STEPS.map(v => `<button data-time="${v}"${v === debug.timeScale ? ' class="on"' : ''}>${v}x</button>`).join('')}${keyed(3, 4)}</div>
+    <h3>Skip to</h3><div class="grid">${DEBUG_SKIPS.slice(0, 6).map((d, i) => btn(d, i, 's')).join('')}</div>
+    <h3>Spawn and give</h3><div class="grid">${keyed(4, 12)}</div>
+    <h3>Run</h3><div class="grid">${keyed(13, 16)}</div>
+  </div>`;
+}
+dbgEl.addEventListener('mousedown', e => e.stopPropagation());
+dbgEl.addEventListener('click', e => {
+  if (e.target === dbgEl) return setDebugOpen(false);  // click outside the panel closes it
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.time) return setTimeScale(Number(b.dataset.time));
+  doDebug((b.dataset.list === 'k' ? DEBUG_KEYS : DEBUG_SKIPS)[b.dataset.i]);
+});
+function refreshDebugMenu() { if (debug.open) buildDebugMenu(); }
+function setDebugOpen(on) {
+  debug.open = on; dbgEl.classList.toggle('open', on);
+  for (const k in keys) keys[k] = false;  // don't leave a runner stuck holding a key
+  jumpPressed = punchPressed = mouse.held = false;
+  if (on) buildDebugMenu();
 }
 
 // ---------- Game state ----------
@@ -568,6 +679,7 @@ function update(dt) {
   distance += speed * dt;
   if (boss) updateBoss(dt, gy);
   else maybeStartBoss(dt);
+  if (debug.bossLow && boss && boss.alive) { debug.bossLow = false; boss.hp = Math.min(boss.hp, 25); }
   // During the boss intro and death everything but attacking is frozen.
   const frozen = boss && (boss.state === 'intro' || boss.state === 'dying');
   if (frozen) jumpPressed = false;
@@ -799,6 +911,7 @@ function update(dt) {
 function hurtRunner(lane, dmg, gy, o = {}, blockable = false) {
   const r = lane.body, held = ITEMS[heldKey(r)];
   o.hit = true;
+  if (debug.god) return;  // debug: invulnerable
   if (blockable && held && held.block && Math.random() < held.block) return blockHit(lane, gy);
   r.invuln = INVULN_T; r.hitAt = time; shake = 16;
   r.hp = Math.max(0, r.hp - dmg);
@@ -2720,6 +2833,11 @@ function draw() {
     drawHotbars();
     drawBossUI();
   }
+  if (debug.god || debug.timeScale !== 1) {  // so a cheat never gets left on by accident
+    ctx.save(); ctx.textAlign = 'left'; ctx.font = '700 14px system-ui, sans-serif'; ctx.fillStyle = '#5bd16a';
+    ctx.fillText([debug.god && 'GOD MODE', debug.timeScale !== 1 && debug.timeScale + 'x TIME'].filter(Boolean).join('   '), 14, 24);
+    ctx.restore();
+  }
   if (player && game.paused) drawInventory();
   if (game.state !== 'play') {
     ctx.fillStyle = 'rgba(8,6,12,0.6)'; ctx.fillRect(0, 0, W, H);
@@ -2736,7 +2854,7 @@ function draw() {
     ctx.fillText('1 2 3  left hotbar    4 5 6  right hotbar    Esc  pause / inventory', W / 2, H * 0.55 + 32);
     ctx.fillText('Both runners copy your every move. Survive both worlds.', W / 2, H * 0.55 + 64);
     ctx.globalAlpha = 0.5;
-    ctx.fillText('Testing:  7 enemies   8 platform   9 throwers   0 boss   - club   = +1000 gold   B brutes   X axe   P skip boss   O pond (Shift+O shallow)   R restart', W / 2, H * 0.55 + 96);
+    ctx.fillText('Testing:  /  debug menu (every hotkey, god mode, time speed, skip to boss)', W / 2, H * 0.55 + 96);
     ctx.globalAlpha = 0.5 + 0.5 * Math.sin(performance.now() / 300);
     ctx.fillText(game.state === 'over' ? 'Space or click to retry' : 'Space or click to start', W / 2, H * 0.55 + 140);
     ctx.globalAlpha = 1;
@@ -2745,8 +2863,10 @@ function draw() {
 
 let last = performance.now();
 function loop(now) {
-  const dt = Math.min(0.033, (now - last) / 1000); last = now;
-  update(dt); draw();
+  let dt = Math.min(0.033, (now - last) / 1000) * debug.timeScale; last = now;
+  if (debug.open) dt = 0;  // the debug menu freezes everything
+  while (dt > 1e-6) { const step = Math.min(0.033, dt); update(step); dt -= step; }  // fast time runs extra steps, not bigger ones
+  draw();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
