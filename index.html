@@ -45,7 +45,10 @@ window.addEventListener('keydown', e => {
   // Escape freezes the run and opens the inventory; while it's open, nothing else reaches the game
   if (k === 'escape') { if (game.state === 'play') setPaused(!game.paused); return; }
   if (!keys[k] && runDebugKey(k, e.shiftKey, false)) { keys[k] = true; return; }
-  if (game.paused) { keys[k] = true; return; }
+  if (game.paused) {
+    if (k === 'tab') { e.preventDefault(); if (!e.repeat) setShopOpen(!menu.shopOpen); }
+    keys[k] = true; return;
+  }
   if ((k === 'w' || k === ' ') && !keys[k]) jumpPressed = true;
   if ((k === ' ' || k === 'enter') && game.state !== 'play') startGame();
   if (game.state === 'play' && !keys[k]) {
@@ -62,16 +65,18 @@ canvas.addEventListener('mousemove', e => {
   mouse.x = e.clientX; mouse.y = e.clientY;
   // in the inventory, pressing on an item and moving a few px picks it up
   const d = menu.down;
-  if (d && !menu.drag && laneFor(d.side).body.inv[d.i] && Math.hypot(mouse.x - d.x, mouse.y - d.y) > 5) menu.drag = d;
-  canvas.style.cursor = game.paused ? (menu.drag ? 'grabbing' : menuSlotAt(mouse.x, mouse.y) || shopButtonAt(mouse.x, mouse.y) ? 'pointer' : 'default')
+  if (d && !menu.drag && stackAt(d) && Math.hypot(mouse.x - d.x, mouse.y - d.y) > 5) menu.drag = d;
+  canvas.style.cursor = game.paused ? (menu.drag ? 'grabbing' : menuRefAt(mouse.x, mouse.y) || shopButtonAt(mouse.x, mouse.y) || shopToggleAt(mouse.x, mouse.y) ? 'pointer' : 'default')
                       : game.state === 'play' && hotbarAt(mouse.x, mouse.y) ? 'pointer' : '';
 });
 canvas.addEventListener('mousedown', e => {
   mouse.x = e.clientX; mouse.y = e.clientY;
   if (game.paused) {
+    if (shopToggleAt(mouse.x, mouse.y)) { setShopOpen(!menu.shopOpen); return; }
     const sb = shopButtonAt(mouse.x, mouse.y);
     if (sb) { buy(sb.row, sb.side); return; }
-    const s = menuSlotAt(mouse.x, mouse.y);
+    const s = menuRefAt(mouse.x, mouse.y);
+    if (s && e.shiftKey) { quickBin(s); return; }  // shift-click: straight to the trash (or sold, with the shop open)
     menu.down = s ? { ...s, x: mouse.x, y: mouse.y } : null;
     return;
   }
@@ -85,18 +90,19 @@ window.addEventListener('mouseup', () => {
   const { down, drag } = menu;
   menu.down = menu.drag = null;
   if (!game.paused || !down) return;
-  if (drag) {  // drop: only within the same runner's inventory
-    const to = menuSlotAt(mouse.x, mouse.y);
-    if (to && to.side === drag.side && !moveStack(laneFor(drag.side).body, drag.i, to.i)) {
-      const r = laneFor(drag.side).body, wrong = to.i >= EQUIP0 ? r.inv[drag.i] : r.inv[to.i];
-      const slot = ITEMS[wrong.key].equip;
-      shopNote(slot ? `${ITEMS[wrong.key].name} goes in a ${SLOT_NAMES[slot]} slot` : `${ITEMS[wrong.key].name} can't be worn`, '#ff6b6b');
-    }
-  } else if (down.i < HOTBAR) selectSlot(laneFor(down.side), down.i);  // a plain click on a hotbar slot holds it
+  if (drag) {
+    const to = menuRefAt(mouse.x, mouse.y);
+    if (!to) return;
+    if (isBin(drag.i) || isBin(to.i)) return dropBin(drag, to);
+    // between slots: only within the same runner's inventory
+    if (to.side === drag.side && !moveStack(laneFor(drag.side).body, drag.i, to.i)) wrongSlotNote(laneFor(drag.side).body, drag.i, to.i);
+  } else if (isBin(down.i)) return;
+  else if (down.i < HOTBAR) selectSlot(laneFor(down.side), down.i);  // a plain click on a hotbar slot holds it
   else quickEquip(laneFor(down.side).body, down.i);  // and on gear, wears it (or takes it off)
 });
 function setPaused(on) {
   game.paused = on; menu.down = menu.drag = null; mouse.held = false;
+  menu.trash = menu.sold = null;  // closing the inventory makes the trash and the last sale final
   jumpPressed = punchPressed = false;
   canvas.style.cursor = on ? 'default' : '';
 }
@@ -239,7 +245,9 @@ function setDebugOpen(on) {
 // ---------- Game state ----------
 // Both characters share ONE body state; only the worlds they run through differ.
 const game = { state: 'title', best: 0, paused: false };
-const menu = { down: null, drag: null };  // inventory screen: the slot pressed on, and the one being dragged
+// inventory screen: the slot pressed on, the one being dragged, whether the shop is open, and what's
+// sitting in the trash / sell slot ({ side, stack }, plus `paid` for a sale) until something replaces it
+const menu = { down: null, drag: null, shopOpen: false, trash: null, sold: null };
 let player, lanes, particles, popups, labels, impact, shake, distance, speed, nextBeat, nextPlatform, time;
 
 // Tuning — kept slow for now while players learn the mirrored controls.
@@ -272,15 +280,17 @@ const PUNCH = { name: 'Fists', rarity: 'common', melee: true, anim: 'punch', att
 //   equip       gear: the equipment slot it's worn in ('head', 'chest', 'feet' or 'accessory')
 //   stats       what wearing it adds; every equipped piece's stats are summed (see gearStat)
 //   worn        how it's drawn on a body that wears it (a WORN entry), so runners and enemies show it
+//   value       base sell price in gold for one of it, before the rarity and checkpoint multipliers (see sellValue).
+//               Shop items skip this and sell back for SELL.shopCut of their shop price instead.
 const RARITY = { common: '#ffffff', uncommon: '#5bd16a', rare: '#4da6ff', epic: '#c77dff', legendary: '#ff9f1c' };
 const ITEMS = {
-  shuriken: { name: 'Shuriken', rarity: 'common', stack: 99, attackSpeed: 'fast', min: 12, max: 16, critChance: 0.2, critMult: 2,
+  shuriken: { name: 'Shuriken', rarity: 'common', value: 0.2, stack: 99, attackSpeed: 'fast', min: 12, max: 16, critChance: 0.2, critMult: 2,
               throwSpeed: 650, swing: { dur: 0.18, hit: [0, 0] },
               desc: 'Every 6th grader\'s wet dream, these stars were forged by hand by a master weapon smith (they were made in China and ordered on Amazon). These are consumable items.' },
-  club: { name: 'Spiked Club', rarity: 'rare', melee: true, anim: 'club', attackSpeed: 'slow', min: 24, max: 32, critChance: 0.2, critMult: 2,
+  club: { name: 'Spiked Club', rarity: 'rare', value: 4, melee: true, anim: 'club', attackSpeed: 'slow', min: 24, max: 32, critChance: 0.2, critMult: 2,
           range: 110, swing: { dur: 0.7, hit: [0.36, 1] },  // live from the downswing on, so spam-clicking covers you
           desc: 'Hey batter batter batter- the perfect tool for any major league baseball player, as long as that major league baseball player has a fetish for turning people into pancakes.' },
-  axe: { name: 'Battle Axe', rarity: 'rare', melee: true, anim: 'club', attackSpeed: 'slow', min: 25, max: 25, critChance: 0.2, critMult: 2,
+  axe: { name: 'Battle Axe', rarity: 'rare', value: 3, melee: true, anim: 'club', attackSpeed: 'slow', min: 25, max: 25, critChance: 0.2, critMult: 2,
          range: 85, block: 0.1, swing: { dur: 0.7, hit: [0.36, 1] },
          desc: 'One swing from this can split you in two... again... I guess.' },
   // shop items
@@ -293,15 +303,15 @@ const ITEMS = {
                  critChance: 0.1, critMult: 2, swing: { dur: 0.07, hit: [0, 0] },
                  desc: 'Don\'t bring a knife to a fucking space age superhuman weapon fight. Said to be fueled by pure hatred, this weapon could make even Americans reconsider the 2nd amendment.' },
   // armor
-  rustedHelmet: { name: 'Rusted Helmet', rarity: 'common', type: 'Helmet', equip: 'head', stats: { defense: 3 }, worn: 'rustedHelmet',
+  rustedHelmet: { name: 'Rusted Helmet', rarity: 'common', value: 1.5, type: 'Helmet', equip: 'head', stats: { defense: 3 }, worn: 'rustedHelmet',
                   desc: 'Have you ever used 1-ply toilet paper and thought, \'wow, this is really easy to break\' yeah, well that\'s this item, but in armor form. How stylish.' },
   // Placeholders, so the inventory has something in it. Weapons swing with the punch animation for now.
-  dagger: { name: 'Rusty Dagger', rarity: 'common', melee: true, anim: 'punch', attackSpeed: 'fast', min: 8, max: 11,
+  dagger: { name: 'Rusty Dagger', rarity: 'common', value: 1, melee: true, anim: 'punch', attackSpeed: 'fast', min: 8, max: 11,
             critChance: 0.35, critMult: 2, range: 75, swing: { dur: 0.16, hit: [0.1, 0.9] }, desc: 'Placeholder tooltip.' },
-  pan: { name: 'Frying Pan', rarity: 'uncommon', melee: true, anim: 'punch', attackSpeed: 'medium', min: 17, max: 22,
+  pan: { name: 'Frying Pan', rarity: 'uncommon', value: 2, melee: true, anim: 'punch', attackSpeed: 'medium', min: 17, max: 22,
          critChance: 0.15, critMult: 2.5, range: 95, swing: { dur: 0.26, hit: [0.15, 0.85] }, desc: 'Placeholder tooltip.' },
-  snack: { name: 'Mystery Snack', rarity: 'common', type: 'Consumable', stack: 20, desc: 'Placeholder tooltip. (Can\'t be used yet.)' },
-  pebble: { name: 'Suspicious Pebble', rarity: 'epic', type: 'Trinket', desc: 'Placeholder tooltip.' },
+  snack: { name: 'Mystery Snack', rarity: 'common', value: 0.1, type: 'Consumable', stack: 20, desc: 'Placeholder tooltip. (Can\'t be used yet.)' },
+  pebble: { name: 'Suspicious Pebble', rarity: 'epic', value: 2, type: 'Trinket', desc: 'Placeholder tooltip.' },
 };
 const attackOf = r => ITEMS[r.attack] || PUNCH;
 const swingK = r => r.swingT / attackOf(r).swing.dur;  // 0-1 through the current attack, >1 once it's over
@@ -495,6 +505,9 @@ const between = ([a, b]) => a + Math.random() * (b - a);
 let wallet = 0;
 try { wallet = Number(localStorage.getItem('mirrorrun.wallet')) || 0; } catch (e) {}
 function saveWallet() { try { localStorage.setItem('mirrorrun.wallet', wallet); } catch (e) {} }
+// Selling pays fractions of a coin, so gold is kept to the cent and shown without trailing zeros.
+const roundGold = v => Math.round(v * 100) / 100;
+const fmtGold = v => String(roundGold(v));
 
 // ---------- Biomes ----------
 // Most of the run is open sky, but every so often both worlds run into a stretch of somewhere else:
@@ -2851,6 +2864,12 @@ function drawItemIcon(key, x, y, s = 1, ink = '#f4efe6') {
   } else if (key === 'slot:accessory') {
     ctx.lineWidth = 4.5; ctx.beginPath(); ctx.arc(0, 4, 10, 0, Math.PI * 2); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(6, -8); ctx.lineTo(0, -3); ctx.lineTo(-6, -8); ctx.closePath(); ctx.fill();
+  } else if (key === 'slot:trash') {  // a bin with a lid
+    ctx.fillRect(-15, -12, 30, 4); ctx.fillRect(-5, -16, 10, 4);
+    ctx.beginPath(); ctx.moveTo(-12, -6); ctx.lineTo(12, -6); ctx.lineTo(9, 16); ctx.lineTo(-9, 16); ctx.closePath(); ctx.fill();
+  } else if (key === 'slot:sell') {  // a coin
+    ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2); ctx.stroke();
+    ctx.font = '900 18px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.fillText('$', 0, 7);
   } else if (key === 'pebble') {
     ctx.beginPath(); ctx.moveTo(-14, 4); ctx.lineTo(-9, -8); ctx.lineTo(3, -12); ctx.lineTo(13, -5); ctx.lineTo(14, 6); ctx.lineTo(4, 11); ctx.lineTo(-9, 10);
     ctx.closePath(); ctx.fill();
@@ -2976,13 +2995,22 @@ function menuSlotAt(px, py) {
 const SHOP = [{ key: 'grenade', price: 6 }, { key: 'bandage', price: 10 }, { key: 'obliterator', price: 1000 }];
 const shopWidth = () => Math.max(200, Math.min(300, W * 0.22));
 function shopLayout() {
-  const w = shopWidth(), x = W / 2 - w / 2, top = Math.max(90, H * 0.16), rowH = 74, icon = 50;
+  const w = shopWidth(), x = W / 2 - w / 2, top = Math.max(90, H * 0.16), rowH = 74, icon = 50, h = menuLayout()[0].box.h;
   const rows = SHOP.map((e, i) => {
     const y = top + 82 + i * (rowH + 8), bx = x + 12 + icon + 10, bw = (x + w - 12 - bx - 6) / 2;
     return { ...e, x: x + 8, y, w: w - 16, h: rowH, icon: { x: x + 12, y: y + (rowH - icon) / 2, s: icon },
              buy: [-1, 1].map((side, j) => ({ side, x: bx + j * (bw + 6), y: y + 40, w: bw, h: 26 })) };
   });
-  return { x, top, w, h: menuLayout()[0].box.h, rows };
+  // the sell slot (only while the shop is open) and the trash, side by side above the note line
+  const S = menuLayout()[0].slots[0].s, by = top + h - 62 - S, bins = menu.shopOpen ? ['sell', 'trash'] : ['trash'];
+  const binSlots = bins.map((i, j) => ({ i, x: x + w / 2 - (bins.length * S + (bins.length - 1) * 28) / 2 + j * (S + 28), y: by, s: S }));
+  const toggle = menu.shopOpen ? { x: x + w - 74, y: top + 12, w: 62, h: 24 } : { x: x + 16, y: top + 82, w: w - 32, h: 40 };
+  return { x, top, w, h, rows: menu.shopOpen ? rows : [], bins: binSlots, toggle };
+}
+const shopToggleAt = (px, py) => game.paused && inBox(px, py, shopLayout().toggle);
+function setShopOpen(on) {
+  if (!on) menu.sold = null;  // closing the shop makes the last sale final
+  menu.shopOpen = on; menu.down = menu.drag = null;
 }
 const inBox = (px, py, b) => px >= b.x && px < b.x + b.w && py >= b.y && py < b.y + b.h;
 function shopButtonAt(px, py) {
@@ -2998,6 +3026,105 @@ function buy(e, side) {
   wallet -= e.price; saveWallet();
   shopNote(`${name} got: ${it.name}`, RARITY[it.rarity]);
 }
+
+// ---------- Trash & selling ----------
+// The trash and the sell slot each hold one stack. Putting a stack in pays for it (selling) right
+// away, but it stays there, so it can be dragged back out (giving the gold back) until something
+// else goes in, the shop is closed, or the inventory is closed. Only its owner can take it back.
+// What an item sells for: its `value` x the rarity multiplier x the checkpoint multiplier, or for
+// shop items, SELL.shopCut of what the shop charges (so the Obliterator sells back for 700).
+const SELL = {
+  rarity: { common: 1, uncommon: 1.5, rare: 2.5, epic: 4, legendary: 8 },
+  shopCut: 0.7,
+  checkpointBonus: 0.25,  // +25% sell value per checkpoint reached
+};
+const checkpointLevel = () => game.checkpoint || 0;  // (no checkpoints yet, so this is 0 and the multiplier is 1)
+function sellValue(key, n = 1) {
+  const shop = SHOP.find(e => e.key === key), it = ITEMS[key];
+  const each = shop ? shop.price * SELL.shopCut : (it.value || 0) * SELL.rarity[it.rarity] * (1 + SELL.checkpointBonus * checkpointLevel());
+  return roundGold(each * n);
+}
+const isBin = i => i === 'trash' || i === 'sell';
+const binEntry = i => (i === 'trash' ? menu.trash : menu.sold);
+// The stack at a slot reference: one of a runner's slots ({ side, i }) or a bin ({ i: 'trash' | 'sell' }).
+const stackAt = ref => (isBin(ref.i) ? (binEntry(ref.i) || {}).stack : laneFor(ref.side).body.inv[ref.i]);
+function binAt(px, py) {
+  if (!game.paused) return null;
+  const b = shopLayout().bins.find(b => inRect(px, py, b)), e = b && binEntry(b.i);
+  return b ? { i: b.i, side: e ? e.side : 0 } : null;
+}
+const menuRefAt = (px, py) => menuSlotAt(px, py) || binAt(px, py);
+function wrongSlotNote(r, from, to) {
+  const wrong = to >= EQUIP0 ? r.inv[from] : r.inv[to], slot = ITEMS[wrong.key].equip;
+  shopNote(slot ? `${ITEMS[wrong.key].name} goes in a ${SLOT_NAMES[slot]} slot` : `${ITEMS[wrong.key].name} can't be worn`, '#ff6b6b');
+}
+const stackName = st => ITEMS[st.key].name + (st.n > 1 ? ` x${st.n}` : '');
+// Put a stack in a bin, replacing (for good) whatever was there.
+function putInBin(bin, side, stack) {
+  if (bin === 'trash') {
+    menu.trash = { side, stack };
+    return shopNote(`Trashed ${stackName(stack)}`, 'rgba(255,255,255,0.7)');
+  }
+  const paid = sellValue(stack.key, stack.n);
+  menu.sold = { side, stack, paid };
+  wallet = roundGold(wallet + paid); saveWallet();
+  shopNote(`Sold ${stackName(stack)} for ${fmtGold(paid)} gold`, '#ffd23f');
+}
+// Can a runner's stack go in this bin? (The shop won't take what's worth nothing.)
+function binTakes(bin, stack) {
+  if (bin === 'sell' && !sellValue(stack.key, stack.n)) { shopNote(`The shop won't buy ${ITEMS[stack.key].name}`, '#ff6b6b'); return false; }
+  return true;
+}
+// Taking a sold stack back costs what it paid.
+function canUnsell(bin) {
+  if (bin !== 'sell' || wallet >= menu.sold.paid) return true;
+  shopNote(`Need ${fmtGold(menu.sold.paid)} gold to buy that back`, '#ff6b6b');
+  return false;
+}
+function clearBin(bin) {
+  if (bin === 'sell') { wallet = roundGold(wallet - menu.sold.paid); saveWallet(); menu.sold = null; } else menu.trash = null;
+}
+// Shift-click: a runner's stack goes straight to the shop if it's open (otherwise the trash),
+// and a stack in a bin goes back to its owner.
+function quickBin(ref) {
+  const st = stackAt(ref);
+  if (!st) return;
+  if (isBin(ref.i)) {
+    const e = binEntry(ref.i);
+    if (!canUnsell(ref.i)) return;
+    if (!addItem(laneFor(e.side).body, st.key, st.n)) return shopNote(`${RUNNER_NAMES[e.side]}'s inventory is full`, '#ff6b6b');
+    return clearBin(ref.i);
+  }
+  const bin = menu.shopOpen ? 'sell' : 'trash';
+  if (!binTakes(bin, st)) return;
+  laneFor(ref.side).body.inv[ref.i] = null;
+  putInBin(bin, ref.side, st);
+}
+// A drag that starts or ends on a bin.
+function dropBin(from, to) {
+  if (from.i === to.i) return;
+  if (!isBin(from.i)) {  // a runner's slot into a bin
+    const r = laneFor(from.side).body, st = r.inv[from.i];
+    if (!binTakes(to.i, st)) return;
+    r.inv[from.i] = null;
+    return putInBin(to.i, from.side, st);
+  }
+  const e = binEntry(from.i), st = e.stack;
+  if (isBin(to.i)) {  // from one bin straight into the other
+    if (!binTakes(to.i, st) || !canUnsell(from.i)) return;
+    clearBin(from.i);
+    return putInBin(to.i, e.side, st);
+  }
+  // out of a bin, back into a slot: only its owner's, and only an empty slot or a matching stack with room
+  if (to.side !== e.side) return shopNote(`That belongs to the ${RUNNER_NAMES[e.side]}`, '#ff6b6b');
+  const r = laneFor(e.side).body, there = r.inv[to.i];
+  if (!fitsSlot(st.key, to.i)) return shopNote(ITEMS[st.key].equip ? `${ITEMS[st.key].name} goes in a ${SLOT_NAMES[ITEMS[st.key].equip]} slot` : `${ITEMS[st.key].name} can't be worn`, '#ff6b6b');
+  if (there && (there.key !== st.key || there.n + st.n > maxStack(st.key))) return shopNote('No room there', '#ff6b6b');
+  if (!canUnsell(from.i)) return;
+  if (there) there.n += st.n; else r.inv[to.i] = st;
+  clearBin(from.i);
+}
+
 function drawCoin(x, y, r = 10) {
   ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#ffd23f'; ctx.beginPath(); ctx.arc(x, y, r * 0.75, 0, Math.PI * 2); ctx.fill();
@@ -3010,7 +3137,7 @@ function drawShop() {
   ctx.textAlign = 'center'; ctx.fillStyle = '#ffd23f'; ctx.font = '800 22px system-ui, sans-serif';
   ctx.fillText('SHOP', cx, L.top + 36);
   ctx.font = '700 16px system-ui, sans-serif';
-  const gold = String(wallet), gw = ctx.measureText(gold).width;
+  const gold = fmtGold(wallet), gw = ctx.measureText(gold).width;
   drawCoin(cx - (gw + 22) / 2 + 8, L.top + 55, 8);
   ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.fillText(gold, cx - (gw + 22) / 2 + 22, L.top + 61);
   for (const row of L.rows) {
@@ -3034,6 +3161,29 @@ function drawShop() {
       ctx.globalAlpha = 1;
     }
   }
+  // open / close
+  const t = L.toggle, tHot = inBox(mouse.x, mouse.y, t);
+  ctx.fillStyle = tHot ? '#ffd23f' : 'rgba(255,255,255,0.08)'; ctx.strokeStyle = '#ffd23f'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(t.x, t.y, t.w, t.h, 6); ctx.fill(); ctx.stroke();
+  ctx.textAlign = 'center'; ctx.fillStyle = tHot ? INK : '#ffd23f';
+  ctx.font = menu.shopOpen ? '700 12px system-ui, sans-serif' : '700 15px system-ui, sans-serif';
+  ctx.fillText(menu.shopOpen ? 'Close' : 'Open shop  (Tab)', t.x + t.w / 2, t.y + t.h / 2 + (menu.shopOpen ? 4 : 5));
+  if (!menu.shopOpen) {
+    ctx.font = '500 13px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    for (const [i, l] of wrapText('Open the shop to buy, or to sell by shift-clicking items', L.w - 32).entries()) ctx.fillText(l, cx, t.y + t.h + 24 + i * 17);
+  }
+  // the sell slot and the trash: hovering one with a dragged item lights it up
+  for (const b of L.bins) {
+    const e = binEntry(b.i), accent = b.i === 'sell' ? '#ffd23f' : '#ff6b6b';
+    const lifted = menu.drag && menu.drag.i === b.i, over = menu.drag && !lifted && inRect(mouse.x, mouse.y, b);
+    ctx.textAlign = 'center'; ctx.font = '700 12px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.fillText(b.i === 'sell' ? 'SELL' : 'TRASH', b.x + b.s / 2, b.y - 10);
+    drawSlot(b.x, b.y, b.s, e && e.stack, { selected: over, accent, lifted, ghost: b.i });
+    if (e && b.i === 'sell' && !lifted) {
+      ctx.textAlign = 'center'; ctx.font = '700 12px system-ui, sans-serif'; ctx.fillStyle = '#ffd23f';
+      ctx.fillText(`+${fmtGold(e.paid)}`, b.x + b.s / 2, b.y + b.s + 15);
+    }
+  }
   // what just happened (bought, or why not)
   const n = menu.note, age = n ? performance.now() - n.at : Infinity;
   if (age < 2200) {
@@ -3051,7 +3201,7 @@ function drawInventory() {
   ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
   ctx.font = '900 40px system-ui, sans-serif'; ctx.fillText('PAUSED', W / 2, Math.max(50, H * 0.16 - 34));
   ctx.font = '500 15px system-ui, sans-serif'; ctx.globalAlpha = 0.6;
-  ctx.fillText('Esc to resume   ·   drag items to organize   ·   click a hotbar slot to hold it   ·   click armor to wear it   ·   buy with ◀ / ▶ to pick who gets it', W / 2, Math.max(50, H * 0.16 - 34) + 26);
+  ctx.fillText('Esc to resume   ·   drag items to organize   ·   click a hotbar slot to hold it   ·   click armor to wear it   ·   shift-click to trash (or sell, with the shop open)', W / 2, Math.max(50, H * 0.16 - 34) + 26);
   ctx.globalAlpha = 1;
   const layout = menuLayout();
   for (const p of layout) {
@@ -3086,11 +3236,15 @@ function drawInventory() {
   }
   drawShop();
   if (menu.drag) {  // the item being dragged follows the cursor
-    const st = laneFor(menu.drag.side).body.inv[menu.drag.i];
+    const st = stackAt(menu.drag);
     if (st) drawItemIcon(st.key, mouse.x, mouse.y, layout[0].slots[0].s / 52);
   } else {
-    const h = menuSlotAt(mouse.x, mouse.y), st = h && laneFor(h.side).body.inv[h.i];
-    if (st) drawTooltip(ITEMS[st.key], st);
+    const h = menuRefAt(mouse.x, mouse.y), st = h && stackAt(h);
+    if (st && h.i === 'sell') drawTooltip(ITEMS[st.key], st, 0, [[`Sold for ${fmtGold(menu.sold.paid)} gold`, '700 15px', '#ffd23f'],
+                                                              ['Drag it back out to undo the sale', '600 13px', 'rgba(255,255,255,0.6)']]);
+    else if (st && h.i === 'trash') drawTooltip(ITEMS[st.key], st, 0, [['In the trash', '700 15px', '#ff6b6b'],
+                                                                   ['Gone for good once something else is trashed or you close the inventory', '600 13px', 'rgba(255,255,255,0.6)']]);
+    else if (st) drawTooltip(ITEMS[st.key], st, 0, menu.shopOpen ? [[`Sells for ${fmtGold(sellValue(st.key, st.n))} gold`, '700 15px', '#ffd23f']] : []);
     else if (h && h.i < HOTBAR) drawTooltip(PUNCH, null);
     else if (!shopButtonAt(mouse.x, mouse.y)) { const row = shopRowAt(mouse.x, mouse.y); if (row) drawTooltip(ITEMS[row.key], null, row.price); }
   }
@@ -3109,7 +3263,7 @@ function wrapText(text, maxW) {
 }
 const cap = s => s[0].toUpperCase() + s.slice(1);
 // Hover tooltip next to the cursor: name, type, stats, then the flavor text.
-function drawTooltip(it, stack, price = 0) {
+function drawTooltip(it, stack, price = 0, extra = []) {
   const type = it.throwSpeed ? 'Thrown weapon' : it.beam ? 'Laser weapon' : it.melee ? 'Melee weapon' : it.type || 'Item';
   const rows = [[it.name, '800 18px', RARITY[it.rarity]], [`${type}  ·  ${cap(it.rarity)}`, '600 13px', 'rgba(255,255,255,0.5)']];
   if (it.min !== undefined) {
@@ -3134,6 +3288,7 @@ function drawTooltip(it, stack, price = 0) {
   if (it.cooldown) rows.push([`${it.cooldown}s cooldown`, '600 15px', '#fff']);
   if (price) rows.push(['', '6px'], [`Price: ${price} gold`, '700 15px', wallet >= price ? '#ffd23f' : '#ff6b6b']);
   if (stack && maxStack(stack.key) > 1) rows.push([`Stack: ${stack.n} / ${maxStack(stack.key)}`, '600 13px', 'rgba(255,255,255,0.5)']);
+  if (extra.length) { ctx.font = '600 13px system-ui, sans-serif'; rows.push(['', '6px']); for (const [t, f, c] of extra) for (const l of wrapText(t, 250)) rows.push([l, f, c]); }
   if (it.desc) {
     rows.push(['', '6px']);
     ctx.font = 'italic 500 14px system-ui, sans-serif';
@@ -3203,7 +3358,7 @@ function draw() {
     if (!boss || boss.state === 'approach' || boss.state === 'exit') ctx.fillText(Math.floor(distance / 10) + ' m', W / 2, 46);
     // wallet (persists between runs; the shop will spend it later)
     ctx.font = '700 20px system-ui, sans-serif';
-    const label = String(wallet), lw = ctx.measureText(label).width;
+    const label = fmtGold(wallet), lw = ctx.measureText(label).width;
     const cx = W / 2 - (lw + 22) / 2;
     drawCoin(cx + 8, 74);
     ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.fillText(label, cx + 22, 81); ctx.textAlign = 'center';
