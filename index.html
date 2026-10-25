@@ -2740,10 +2740,11 @@ function drawLane(lane, sky) {
   for (let x = -(distance % 60); x < half; x += 60) ctx.fillRect(x, gy + 14 + (inView ? groundLift(lane, x + 13) : 0), 26, 3);
   if (boss) drawLair(boss.gateD, boss.exitD, gy, half);
   if (outpost && outpost.d - CHECKPOINT.halfW < half + 40) {  // drawn unmirrored, so its sign reads right on both sides
-    // each side only has its own half of the building, so it reads as one shop split by the seam
+    // coming in, each side only has its own half of the building, so it reads as one shop split by the
+    // seam; on the way out each side gets the whole thing, so it passes by intact behind both runners
     const cx = lane.side < 0 ? outpost.d : W - outpost.d;
     ctx.save(); if (lane.side > 0) { ctx.translate(W, 0); ctx.scale(-1, 1); }
-    ctx.beginPath(); ctx.rect(lane.side < 0 ? cx - CHECKPOINT.halfW - 80 : cx, 0, CHECKPOINT.halfW + 80, H); ctx.clip();
+    if (outpost.state !== 'exit') { ctx.beginPath(); ctx.rect(lane.side < 0 ? cx - CHECKPOINT.halfW - 80 : cx, 0, CHECKPOINT.halfW + 80, H); ctx.clip(); }
     drawShopBuilding(cx, gy, shopStyle(outpost.k), outpost.k);
     ctx.restore();
   }
