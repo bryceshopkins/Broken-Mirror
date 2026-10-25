@@ -454,7 +454,8 @@ function saveWallet() { try { localStorage.setItem('mirrorrun.wallet', wallet); 
 // Heights (h) are px above the normal floor line; they all leave room to jump and stand on platforms.
 const BIOME = {
   first: [5000, 9000], gap: [9000, 16000],  // open running before the first one, and between them
-  len: { tunnel: [2600, 3800], cave: [2800, 4200] },
+  // Most are long stretches (30 s or more even at top speed); now and then it's a quick one.
+  len: { tunnel: [13000, 20000], cave: [13000, 20000] }, quick: 0.25, quickLen: [2600, 4200],
   ramp: 420,                                // length of the slope in and out
   tunnel: { lift: 40, step: 620, blend: 120, h: [205, 290], spikes: 0.55 },
   cave: { h: [225, 295], tooth: 46, toothDepth: [8, 38], bump: 9, spikes: 0.2, pond: 0.4 },
@@ -527,7 +528,7 @@ function startBiome(kind, now = false) {
                        ((['block', 'spike', 'bar', 'platform'].includes(o.type) || (o.type === 'enemy' && !o.walks)) && o.d + (o.len || 0) / 2 > ahead - 40);
     for (const lane of lanes) lane.obs = lane.obs.filter(o => !clear(o) && !(o.pond && clear(o.pond)));
   } else for (const lane of lanes) for (const o of lane.obs) ahead = Math.max(ahead, o.d + (o.len || 0) / 2 + 200);
-  const len = between(BIOME.len[kind]);
+  const len = between(Math.random() < BIOME.quick ? BIOME.quickLen : BIOME.len[kind]);
   game.biome = { kind, start: distance + ahead, end: distance + ahead + len, seed: Math.floor(Math.random() * 1000) };
   return true;
 }
