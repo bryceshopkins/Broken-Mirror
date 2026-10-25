@@ -154,6 +154,8 @@ const DEBUG_KEYS = [
   } },
   { key: 'h', label: 'Spawn helmeted enemies', run: () => lanes.forEach(l => { const o = spawnObstacle(l, 'enemy'); if (o) o.gear = ['rustedHelmet']; }) },
   { key: 'j', label: 'Give Rusted Helmet', stay: true, run: () => giveBoth('rustedHelmet') },
+  { key: 'k', label: 'Spawn knife enemies', run: () => lanes.forEach(l => spawnObstacle(l, 'knifer')) },
+  { key: 'l', label: 'Give Knife', stay: true, run: () => giveBoth('knife') },
 ];
 function debugBiome(kind) {
   if (boss) return debugNote('NOT DURING GRONK');
@@ -221,7 +223,7 @@ function buildDebugMenu() {
     <h3>Time</h3><div class="time">${keyed(1, 2)}<span class="val">${debug.timeScale}x</span>${keyed(2, 3)}
       ${TIME_STEPS.map(v => `<button data-time="${v}"${v === debug.timeScale ? ' class="on"' : ''}>${v}x</button>`).join('')}${keyed(3, 4)}</div>
     <h3>Skip to</h3><div class="grid">${DEBUG_SKIPS.slice(0, 6).map((d, i) => btn(d, i, 's')).join('')}</div>
-    <h3>Spawn and give</h3><div class="grid">${keyed(4, 12)}${keyed(19, 21)}</div>
+    <h3>Spawn and give</h3><div class="grid">${keyed(4, 12)}${keyed(19, 23)}</div>
     <h3>Biomes</h3><div class="grid">${keyed(16, 19)}</div>
     <h3>Run</h3><div class="grid">${keyed(13, 16)}</div>
   </div>`;
@@ -302,6 +304,9 @@ const ITEMS = {
   obliterator: { name: 'The Obliterator', rarity: 'legendary', beam: true, auto: true, attackSpeed: 'extreme', min: 200, max: 200,
                  critChance: 0.1, critMult: 2, swing: { dur: 0.07, hit: [0, 0] },
                  desc: 'Don\'t bring a knife to a fucking space age superhuman weapon fight. Said to be fueled by pure hatred, this weapon could make even Americans reconsider the 2nd amendment.' },
+  knife: { name: 'Knife', rarity: 'uncommon', melee: true, anim: 'punch', attackSpeed: 'fast', min: 13, max: 17,
+           critChance: 0.3, critMult: 2, range: 85, swing: { dur: 0.16, hit: [0.1, 0.9] },
+           desc: 'It\'s a knife. Stab something. Go on.' },
   // armor
   rustedHelmet: { name: 'Rusted Helmet', rarity: 'common', value: 1.5, type: 'Helmet', equip: 'head', stats: { defense: 3 }, worn: 'rustedHelmet',
                   desc: 'Have you ever used 1-ply toilet paper and thought, \'wow, this is really easy to break\' yeah, well that\'s this item, but in armor form. How stylish.' },
@@ -344,10 +349,20 @@ const MAX_HP = 100, INVULN_T = 1.2;  // s of invulnerability after a hit (each r
 // enemies sometimes drop (only while that runner is hurt), and a few big ones from every boss.
 const REGEN = { delay: 5, rate: 0.35 };  // s after a hit before it starts; HP per second
 const HEALTH_DROP = { chance: 0.08, enemyHeal: 10, bossHeal: 25, bossCount: 2 };
-const DAMAGE = { cspike: 20, brute: 25, axe: 35, enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45, piranha: 20 };
+const DAMAGE = { cspike: 20, brute: 25, axe: 35, enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45, piranha: 20, knifer: 30 };
 const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5, waterDrag: 0.35 };  // thrown at chest height; waterDrag = speed kept underwater
 const SHURIKEN_DROP_WEIGHTS = [0, 0, 4, 8, 12, 14, 14, 13, 11, 9, 7, 5, 3];  // index = how many a thrower drops (2-12, usually 4-8)
 const NINJA_CHANCE = 0.25;  // chance a plain enemy spawns as a thrower instead (about 2.5 walkers per ninja overall)
+// Knife guys: walkers that hit harder and, instead of just walking into you, stab from a short way off.
+// They wind up (blade flashes red) once you're about to be in reach, then jab at chest height: hit
+// them first (every weapon outreaches the blade) or jump it. Their stab and their body both do DAMAGE.knifer.
+const KNIFER = {
+  chance: 0.15,                     // chance a plain walker (not a ninja) spawns with a knife
+  reach: 36,                        // how far past his body the blade reaches
+  zone: { lo: 40, hi: 68 },         // the height band the stab covers, above his feet
+  windup: 0.3, stab: 0.24, cooldown: 1.0,
+  knifeDrop: 0.1,
+};
 // Brutes show up once Gronk is down: slow and thick, swinging a huge axe in an overhead arc that
 // covers everything in front of them and above their head, so hopping over one gets you chopped.
 // Slide under the swing. Every hit knocks them back as far as the ground scrolls before your next
@@ -677,7 +692,8 @@ function spawnObstacle(lane, type, extra = 0, y = 0, placed = false) {
   if (!placed && type !== 'coin' && type !== 'enemy' && pondAt(lane, d)) return null;
   if (type === 'enemy' && (placed || !pondAt(lane, d)) && Math.random() < NINJA_CHANCE) type = 'thrower';  // not in the water
   let kind = null;
-  if (type === 'thrower' || type === 'brute') { kind = type; type = 'enemy'; }
+  if (type === 'enemy' && Math.random() < KNIFER.chance) type = 'knifer';  // (a walker that didn't turn ninja)
+  if (type === 'thrower' || type === 'brute' || type === 'knifer') { kind = type; type = 'enemy'; }
   const isTerrain = type === 'ledge' || type === 'tunnel';
   let len = 0;
   if (isTerrain) {
@@ -691,7 +707,7 @@ function spawnObstacle(lane, type, extra = 0, y = 0, placed = false) {
   if (type === 'bar' && nearEnemy(lane, d, 120)) return null;
   const lift = placed || isTerrain ? 0 : ledgeLift(lane, d) - groundLift(lane, d);  // sits on a ledge, or a tunnel or cave floor
   const o = { type, d, y: y - lift, hit: false, dead: false, hp: ENEMY_HP, t: Math.random() * 6,
-              walks: type === 'enemy' && !placed && (!kind || kind === 'brute') };
+              walks: type === 'enemy' && !placed && kind !== 'thrower' };
   if (type === 'enemy' && kind !== 'brute') {  // the odd one shows up wearing something (one piece per slot)
     for (const key in ENEMY_GEAR) {
       if (Math.random() >= ENEMY_GEAR[key].chance || (o.gear || []).some(g => ITEMS[g].equip === ITEMS[key].equip)) continue;
@@ -699,6 +715,7 @@ function spawnObstacle(lane, type, extra = 0, y = 0, placed = false) {
     }
   }
   if (kind === 'thrower') { o.kind = kind; o.throwCd = 0.05 + Math.random() * 0.25; o.windT = 0; o.relT = 0; }
+  if (kind === 'knifer') Object.assign(o, { kind, windT: 0, stabT: 0, cd: 0, stabHit: false });
   if (kind === 'brute') Object.assign(o, { kind, hp: BRUTE.hp, maxHp: BRUTE.hp, kb: 0, cd: 0.3, windT: 0, windMax: BRUTE.windup, swingT: 0, recT: 0, stunT: 0, counter: false, flashT: 0 });
   if (type === 'tunnel') { o.depth = TUNNEL.depth; o.gap = TUNNEL.gap; }
   if (isTerrain) { o.len = len; o.d += len / 2; settleOnto(lane, o); }
@@ -999,6 +1016,7 @@ function update(dt) {
       o.d -= (speed + (walking ? step : 0)) * dt; o.t += dt;
       if (o.kind === 'thrower') updateThrower(lane, o, dt);
       if (o.kind === 'brute') updateBrute(lane, o, dt);
+      if (o.kind === 'knifer') updateKnifer(lane, o, dt);
       if (o.kind === 'piranha') updatePiranha(lane, o, dt, gy);
       // walking enemies follow the terrain: hop up onto raised ground, drop into holes
       if (o.walks) {
@@ -1084,6 +1102,10 @@ function update(dt) {
       // a brute's axe only hurts while it's coming down, anywhere in front of him or over his head
       if (o.kind === 'brute' && o.swingT > 0 && !o.swingHit && r.invuln <= 0 && overlaps(bruteZone(o, gy), pb)) {
         o.swingHit = true; hurtRunner(lane, DAMAGE.axe, gy, {}, true); shake = Math.max(shake, 10);
+      }
+      // a knife guy's stab hurts anywhere along the blade while it's going out
+      if (o.kind === 'knifer' && o.stabT > 0 && !o.stabHit && r.invuln <= 0 && overlaps(knifeZone(o, gy), pb)) {
+        o.stabHit = true; hurtRunner(lane, DAMAGE.knifer, gy, {}, true);
       }
       // Each punch can hit each enemy once; both runners punch, so it lands in either lane
       // (as long as that runner is roughly on the enemy's level).
@@ -1238,6 +1260,23 @@ function updateThrower(lane, o, dt) {
   }
 }
 
+// Knife guys: once you're about to walk into reach, wind up, then stab (live for the first part of it).
+const knifeLive = o => o.stabT > KNIFER.stab * 0.4;
+const knifeZone = (o, gy) => ({ d0: o.d - 14 - KNIFER.reach, d1: o.d, y0: gy + o.y - KNIFER.zone.hi, y1: gy + o.y - KNIFER.zone.lo });
+function updateKnifer(lane, o, dt) {
+  o.cd -= dt;
+  if (o.stabT > 0) { o.stabT -= dt; if (!knifeLive(o)) o.stabHit = true; return; }
+  if (o.windT > 0) {
+    o.windT -= dt;
+    if (o.windT <= 0) { o.stabT = KNIFER.stab; o.stabHit = false; o.cd = KNIFER.cooldown; }
+    return;
+  }
+  // start winding up when the ground scrolling in will bring you into reach right as the stab lands
+  const gap = o.d - 14 - KNIFER.reach - (player.off + 11);
+  if (o.cd <= 0 && o.d < W / 2 - 20 && o.d - 14 > player.off - 5 && gap < (speed + 25) * KNIFER.windup &&
+      Math.abs(lane.body.y - o.y) < 90) o.windT = KNIFER.windup;
+}
+
 // Water. Ripples are flat rings spreading out on a pond's surface (drawn with the water, see drawWater).
 // Spray is silhouette drops (dark, with some in the lane's glow color) that vanish back into the water.
 function ripple(lane, d, size = 1, delay = 0) {
@@ -1327,6 +1366,7 @@ function hitEnemy(o, lane, gy, weapon = PUNCH) {
     if (lane.body.hp < MAX_HP && Math.random() < HEALTH_DROP.chance) dropHealth(lane, o, HEALTH_DROP.enemyHeal);
     if (o.kind === 'thrower') dropItems(lane, o, 'shuriken', rollWeighted(SHURIKEN_DROP_WEIGHTS));
     for (const key of o.gear || []) if (Math.random() < ENEMY_GEAR[key].drop) dropItems(lane, o, key, 1);
+    if (o.kind === 'knifer' && Math.random() < KNIFER.knifeDrop) dropItems(lane, o, 'knife', 1);
     if (brute) { dropCoins(lane, o); if (Math.random() < BRUTE.axeDrop) dropItems(lane, o, 'axe', 1); }
     // the enemy's body snaps apart into flying sticks
     if (fish) splash(lane, o.d, gy, 0.6);
@@ -1981,7 +2021,7 @@ function drawStick(x, gy, pose) {
 function drawEnemy(x, gy, o) {
   if (o.kind === 'brute') return drawBrute(x, gy, o);
   if (o.kind === 'piranha') return drawPiranha(x, gy, o);
-  const thrower = o.kind === 'thrower';
+  const thrower = o.kind === 'thrower', knifer = o.kind === 'knifer';
   ctx.save(); ctx.translate(2 * x, 0); ctx.scale(-1, 1);  // face the player
   // Thrower animation: settle, lean back to cock the arm, then lunge forward with an overhand whip.
   let pose = { phase: o.t * 7, mode: 'run', lean: 0.05 };
@@ -1990,7 +2030,18 @@ function drawEnemy(x, gy, o) {
     if (o.windT > 0) pose = { ...pose, windup: true, lean: -0.1 - 0.25 * (1 - o.windT / STAR.windup) };
     else if (o.relT > 0) pose = { ...pose, throwing: true, lean: 0.15 + 0.35 * (o.relT / THROW_REL_T) };
   }
-  drawStick(x, gy, { ...pose, gear: o.gear });
+  // Knife guy: draws the knife hand back to the chest and leans away, then jabs it straight out
+  let stab = -1;
+  if (knifer && o.windT > 0) pose = { ...pose, lean: 0.05 - 0.2 * (1 - o.windT / KNIFER.windup) };
+  if (knifer && o.stabT > 0) { stab = 0.55 * (1 - o.stabT / KNIFER.stab); pose = { ...pose, lean: 0.3 }; }
+  const hand = drawStick(x, gy, { ...pose, gear: o.gear, punch: knifer && (o.windT > 0 || stab >= 0) ? Math.max(0, stab) : -1 });
+  if (knifer && hand) {
+    const warn = o.windT > 0 ? 1 - o.windT / KNIFER.windup : 0;
+    ctx.save();
+    if (warn > 0) { ctx.shadowColor = '#ff3b3b'; ctx.shadowBlur = 6 + warn * 14; }
+    drawKnife(hand[0], hand[1], o.windT > 0 || stab >= 0 ? 0 : 0.5 + Math.sin(o.t * 7) * 0.2, 0.8, warn > 0 ? '#ff3b3b' : INK);
+    ctx.restore();
+  }
   if (thrower && o.relT > 0) {  // swoosh trailing the throwing hand
     ctx.save(); ctx.strokeStyle = '#ff3b3b'; ctx.lineCap = 'round';
     ctx.globalAlpha = o.relT / THROW_REL_T; ctx.lineWidth = 3;
@@ -2579,7 +2630,7 @@ function drawLane(lane, sky) {
       drawMelee(o.item, o.d - 20, gy + o.y + Math.sin(o.t * 3) * 2, -0.35, 0.9);
       ctx.restore();
     }
-    else if (o.type === 'item' && ITEMS[o.item].equip) {
+    else if (o.type === 'item' && (ITEMS[o.item].equip || o.item === 'knife')) {
       ctx.save(); ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 14;
       drawItemIcon(o.item, o.d, gy + o.y + Math.sin(o.t * 3) * 2, 0.75);
       ctx.restore();
@@ -2812,10 +2863,19 @@ function drawBossUI() {
 }
 
 // ---------- Hotbar & inventory screen ----------
+// A kitchen knife pointing along angle a from the hand at (x, y): a short grip behind, the blade out front.
+function drawKnife(x, y, a, s = 1, ink = INK) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a); ctx.scale(s, s);
+  ctx.strokeStyle = ctx.fillStyle = ink; ctx.lineCap = 'round';
+  ctx.lineWidth = 5; seg(-8, 0, 2, 0);  // grip
+  ctx.beginPath(); ctx.moveTo(3, -3); ctx.lineTo(18, -3); ctx.quadraticCurveTo(24, -2, 27, 1); ctx.lineTo(3, 3.5); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
 // An item's icon, centered on (x, y), about 40px across at s = 1. Light by default, for the dark slots.
 function drawItemIcon(key, x, y, s = 1, ink = '#f4efe6') {
   if (key === 'shuriken') return drawShuriken(x, y, 0.3, ink === INK ? '#ffffff' : INK, false, 1.3 * s, ink);
   if (key === 'obliterator') { ctx.save(); drawObliterator(x - 14 * 0.42 * s, y + 6 * 0.42 * s, 0, 0.42 * s, ink); ctx.restore(); return; }
+  if (key === 'knife') { const a = -0.8; return drawKnife(x - Math.cos(a) * 9 * s, y - Math.sin(a) * 9 * s, a, 1.1 * s, ink); }
   if (key === 'axe') { const a = -0.8; return drawAxe(x - Math.cos(a) * 17 * s, y - Math.sin(a) * 17 * s, a, 0.58 * s, ink); }
   if (key === 'club') { const a = -0.8; return drawClub(x - Math.cos(a) * 17 * s, y - Math.sin(a) * 17 * s, a, 0.62 * s, ink); }
   if (ITEMS[key] && ITEMS[key].worn) {  // gear shows as it looks worn, blown up
