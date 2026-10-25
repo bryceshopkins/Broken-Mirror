@@ -87,8 +87,13 @@ window.addEventListener('mouseup', () => {
   if (!game.paused || !down) return;
   if (drag) {  // drop: only within the same runner's inventory
     const to = menuSlotAt(mouse.x, mouse.y);
-    if (to && to.side === drag.side) moveStack(laneFor(drag.side).body, drag.i, to.i);
+    if (to && to.side === drag.side && !moveStack(laneFor(drag.side).body, drag.i, to.i)) {
+      const r = laneFor(drag.side).body, wrong = to.i >= EQUIP0 ? r.inv[drag.i] : r.inv[to.i];
+      const slot = ITEMS[wrong.key].equip;
+      shopNote(slot ? `${ITEMS[wrong.key].name} goes in a ${SLOT_NAMES[slot]} slot` : `${ITEMS[wrong.key].name} can't be worn`, '#ff6b6b');
+    }
   } else if (down.i < HOTBAR) selectSlot(laneFor(down.side), down.i);  // a plain click on a hotbar slot holds it
+  else quickEquip(laneFor(down.side).body, down.i);  // and on gear, wears it (or takes it off)
 });
 function setPaused(on) {
   game.paused = on; menu.down = menu.drag = null; mouse.held = false;
@@ -141,6 +146,8 @@ const DEBUG_KEYS = [
     const b = game.biome;
     if (b) b.end = Math.min(b.end, Math.max(b.start + 2 * BIOME.ramp, distance + W / 2 + BIOME.ramp));
   } },
+  { key: 'h', label: 'Spawn helmeted enemies', run: () => lanes.forEach(l => { const o = spawnObstacle(l, 'enemy'); if (o) o.gear = ['rustedHelmet']; }) },
+  { key: 'j', label: 'Give Rusted Helmet', stay: true, run: () => giveBoth('rustedHelmet') },
 ];
 function debugBiome(kind) {
   if (boss) return debugNote('NOT DURING GRONK');
@@ -208,7 +215,7 @@ function buildDebugMenu() {
     <h3>Time</h3><div class="time">${keyed(1, 2)}<span class="val">${debug.timeScale}x</span>${keyed(2, 3)}
       ${TIME_STEPS.map(v => `<button data-time="${v}"${v === debug.timeScale ? ' class="on"' : ''}>${v}x</button>`).join('')}${keyed(3, 4)}</div>
     <h3>Skip to</h3><div class="grid">${DEBUG_SKIPS.slice(0, 6).map((d, i) => btn(d, i, 's')).join('')}</div>
-    <h3>Spawn and give</h3><div class="grid">${keyed(4, 12)}</div>
+    <h3>Spawn and give</h3><div class="grid">${keyed(4, 12)}${keyed(19, 21)}</div>
     <h3>Biomes</h3><div class="grid">${keyed(16, 19)}</div>
     <h3>Run</h3><div class="grid">${keyed(13, 16)}</div>
   </div>`;
@@ -262,6 +269,9 @@ const PUNCH = { name: 'Fists', rarity: 'common', melee: true, anim: 'punch', att
 //   heal        HP restored when used from the hotbar (`cooldown`: seconds before that runner can use another)
 //   stack       how many fit in one slot (default 1)
 //   type        what the tooltip calls items that aren't weapons
+//   equip       gear: the equipment slot it's worn in ('head', 'chest', 'feet' or 'accessory')
+//   stats       what wearing it adds; every equipped piece's stats are summed (see gearStat)
+//   worn        how it's drawn on a body that wears it (a WORN entry), so runners and enemies show it
 const RARITY = { common: '#ffffff', uncommon: '#5bd16a', rare: '#4da6ff', epic: '#c77dff', legendary: '#ff9f1c' };
 const ITEMS = {
   shuriken: { name: 'Shuriken', rarity: 'common', stack: 99, attackSpeed: 'fast', min: 12, max: 16, critChance: 0.2, critMult: 2,
@@ -282,6 +292,9 @@ const ITEMS = {
   obliterator: { name: 'The Obliterator', rarity: 'legendary', beam: true, auto: true, attackSpeed: 'extreme', min: 200, max: 200,
                  critChance: 0.1, critMult: 2, swing: { dur: 0.07, hit: [0, 0] },
                  desc: 'Don\'t bring a knife to a fucking space age superhuman weapon fight. Said to be fueled by pure hatred, this weapon could make even Americans reconsider the 2nd amendment.' },
+  // armor
+  rustedHelmet: { name: 'Rusted Helmet', rarity: 'common', type: 'Helmet', equip: 'head', stats: { defense: 3 }, worn: 'rustedHelmet',
+                  desc: 'Have you ever used 1-ply toilet paper and thought, \'wow, this is really easy to break\' yeah, well that\'s this item, but in armor form. How stylish.' },
   // Placeholders, so the inventory has something in it. Weapons swing with the punch animation for now.
   dagger: { name: 'Rusty Dagger', rarity: 'common', melee: true, anim: 'punch', attackSpeed: 'fast', min: 8, max: 11,
             critChance: 0.35, critMult: 2, range: 75, swing: { dur: 0.16, hit: [0.1, 0.9] }, desc: 'Placeholder tooltip.' },
@@ -350,6 +363,23 @@ const BRUTE_PATTERNS = [[['brute'], []], [['brute'], ['enemy', 200]], [['brute']
 // Each runner has its own inventory: HOTBAR + BAG slots, each holding a stack { key, n } or nothing.
 // The first HOTBAR slots are the hotbar; `slot` is the one in hand (an empty one means fists).
 const HOTBAR = 3, BAG_COLS = 4, BAG = 12;
+// After the bag come the equipment slots: armor (head, chest, feet), then accessories. Only gear
+// made for a slot (its `equip`) can go in it, and only what's in these slots counts as worn.
+const EQUIP = ['head', 'chest', 'feet', 'accessory', 'accessory', 'accessory'];
+const EQUIP0 = HOTBAR + BAG, ARMOR = 3;
+const SLOT_NAMES = { head: 'head', chest: 'chest', feet: 'boots', accessory: 'accessory' };
+const fitsSlot = (key, i) => i < EQUIP0 || (!!key && ITEMS[key].equip === EQUIP[i - EQUIP0]);
+// Every worn piece's stats add up, so defense from a helmet, chestplate and boots stacks.
+function gearStat(r, stat) {
+  let t = 0;
+  for (let i = EQUIP0; i < r.inv.length; i++) if (r.inv[i]) t += (ITEMS[r.inv[i].key].stats || {})[stat] || 0;
+  return t;
+}
+const wornKeys = r => r.inv.slice(EQUIP0).filter(s => s && ITEMS[s.key].worn).map(s => s.key);
+// Defense D halves the first D points of every hit: 10 damage through 3 defense is 10 - 1.5 = 8.5.
+const afterDefense = (dmg, def) => Math.round((dmg - 0.5 * Math.min(def, dmg)) * 10) / 10;
+// Gear enemies can spawn wearing (`chance`, plain walkers and ninjas only), and how often it drops when they die.
+const ENEMY_GEAR = { rustedHelmet: { chance: 0.05, drop: 0.4 } };
 const RUNNER_NAMES = { '-1': 'Sunset Runner', '1': 'Twilight Runner' };
 // Placeholder starting gear, so the inventory screen has something in it. It goes in the bag,
 // so a run still starts empty-handed until you put something on the hotbar.
@@ -362,12 +392,18 @@ const hotkey = (side, i) => String(i + 1 + (side < 0 ? 0 : HOTBAR));
 // Put n of an item into the inventory: topping up stacks of it first, then the slot in hand if
 // it's empty (so grabbing a weapon empty-handed equips it), then the first free slot.
 // Returns false (and adds nothing) if it doesn't all fit.
+// Gear is put straight on if its slot is free, and otherwise goes in the bag before the hotbar.
 function addItem(r, key, n = 1) {
-  const max = maxStack(key);
-  let room = r.inv.reduce((a, s) => a + (s ? (s.key === key ? max - s.n : 0) : max), 0);
+  const max = maxStack(key), gear = !!ITEMS[key].equip;
+  if (gear && n === 1) {
+    const i = r.inv.findIndex((s, i) => !s && i >= EQUIP0 && fitsSlot(key, i));
+    if (i >= 0) { r.inv[i] = { key, n: 1 }; return true; }
+  }
+  const store = r.inv.slice(0, EQUIP0);  // (equipment slots only take gear put there on purpose)
+  let room = store.reduce((a, s) => a + (s ? (s.key === key ? max - s.n : 0) : max), 0);
   if (room < n) return false;
-  for (const s of r.inv) if (s && s.key === key && s.n < max) { const k = Math.min(n, max - s.n); s.n += k; n -= k; }
-  const order = [r.slot, ...r.inv.keys()];
+  for (const s of store) if (s && s.key === key && s.n < max) { const k = Math.min(n, max - s.n); s.n += k; n -= k; }
+  const order = gear ? [...store.keys()].slice(HOTBAR).concat([...store.keys()].slice(0, HOTBAR)) : [r.slot, ...store.keys()];
   for (const i of order) {
     if (n <= 0) break;
     if (!r.inv[i]) { const k = Math.min(n, max); r.inv[i] = { key, n: k }; n -= k; }
@@ -375,14 +411,30 @@ function addItem(r, key, n = 1) {
   return true;
 }
 // Drag-and-drop: drop onto the same item to merge the stacks, otherwise the two slots swap.
+// Nothing moves if either item would end up in an equipment slot it isn't made for.
 function moveStack(r, a, b) {
   const A = r.inv[a], B = r.inv[b];
-  if (a === b || !A) return;
+  if (a === b || !A) return true;
+  if (!fitsSlot(A.key, b) || (B && !fitsSlot(B.key, a))) return false;
   if (B && B.key === A.key && B.n < maxStack(A.key)) {
     const k = Math.min(A.n, maxStack(A.key) - B.n);
     B.n += k; A.n -= k;
     if (!A.n) r.inv[a] = null;
   } else { r.inv[a] = B; r.inv[b] = A; }
+  return true;
+}
+// A plain click on gear in the inventory puts it on (swapping out whatever was in that slot),
+// and a click on worn gear takes it off into the first free bag slot.
+function quickEquip(r, i) {
+  const st = r.inv[i], slot = st && ITEMS[st.key].equip;
+  if (!slot) return;
+  if (i >= EQUIP0) {
+    const to = r.inv.findIndex((s, j) => !s && j >= HOTBAR && j < EQUIP0);
+    if (to >= 0) moveStack(r, i, to); else shopNote('No room in the bag', '#ff6b6b');
+    return;
+  }
+  const free = EQUIP.findIndex((e, j) => e === slot && !r.inv[EQUIP0 + j]);
+  moveStack(r, i, EQUIP0 + (free >= 0 ? free : EQUIP.indexOf(slot)));
 }
 function selectSlot(lane, i) { lane.body.slot = i; lane.body.switchAt = time; }
 
@@ -391,7 +443,7 @@ function startGame() {
   // Inputs are shared, but each runner has its own body so they can stand on different planes,
   // and its own inventory so they can carry different weapons.
   const body = side => {
-    const r = { hp: MAX_HP, hpLag: MAX_HP, hitAt: -99, invuln: 0, cds: {}, side, y: 0, vy: 0, grounded: true, sliding: false, dropT: 0, inv: Array(HOTBAR + BAG).fill(null), slot: 0, switchAt: -9,
+    const r = { hp: MAX_HP, hpLag: MAX_HP, hitAt: -99, invuln: 0, cds: {}, side, y: 0, vy: 0, grounded: true, sliding: false, dropT: 0, inv: Array(EQUIP0 + EQUIP.length).fill(null), slot: 0, switchAt: -9,
                 attack: 'punch', swingT: 99, punchAlt: false, aimA: Math.PI / 2, attackCd: 0, queued: 0, hits: new Set() };
     START_BAG[side].forEach(([key, n = 1], i) => { r.inv[HOTBAR + i] = { key, n }; });
     return r;
@@ -627,6 +679,12 @@ function spawnObstacle(lane, type, extra = 0, y = 0, placed = false) {
   const lift = placed || isTerrain ? 0 : ledgeLift(lane, d) - groundLift(lane, d);  // sits on a ledge, or a tunnel or cave floor
   const o = { type, d, y: y - lift, hit: false, dead: false, hp: ENEMY_HP, t: Math.random() * 6,
               walks: type === 'enemy' && !placed && (!kind || kind === 'brute') };
+  if (type === 'enemy' && kind !== 'brute') {  // the odd one shows up wearing something (one piece per slot)
+    for (const key in ENEMY_GEAR) {
+      if (Math.random() >= ENEMY_GEAR[key].chance || (o.gear || []).some(g => ITEMS[g].equip === ITEMS[key].equip)) continue;
+      (o.gear = o.gear || []).push(key);
+    }
+  }
   if (kind === 'thrower') { o.kind = kind; o.throwCd = 0.05 + Math.random() * 0.25; o.windT = 0; o.relT = 0; }
   if (kind === 'brute') Object.assign(o, { kind, hp: BRUTE.hp, maxHp: BRUTE.hp, kb: 0, cd: 0.3, windT: 0, windMax: BRUTE.windup, swingT: 0, recT: 0, stunT: 0, counter: false, flashT: 0 });
   if (type === 'tunnel') { o.depth = TUNNEL.depth; o.gap = TUNNEL.gap; }
@@ -1053,6 +1111,7 @@ function hurtRunner(lane, dmg, gy, o = {}, blockable = false) {
   if (debug.god) return;  // debug: invulnerable
   if (blockable && held && held.block && Math.random() < held.block) return blockHit(lane, gy);
   r.invuln = INVULN_T; r.hitAt = time; shake = 16;
+  dmg = afterDefense(dmg, gearStat(r, 'defense'));
   r.hp = Math.max(0, r.hp - dmg);
   burst(player.off, gy + r.y - 35, 20, 1.2, lane.side);
   popups.push({ x: player.off, y: gy + r.y - 95, vx: -40, vy: -220, text: '-' + dmg, hurt: true, side: lane.side, life: 0.9, age: 0 });
@@ -1254,6 +1313,7 @@ function hitEnemy(o, lane, gy, weapon = PUNCH) {
     dropCoins(lane, o);
     if (lane.body.hp < MAX_HP && Math.random() < HEALTH_DROP.chance) dropHealth(lane, o, HEALTH_DROP.enemyHeal);
     if (o.kind === 'thrower') dropItems(lane, o, 'shuriken', rollWeighted(SHURIKEN_DROP_WEIGHTS));
+    for (const key of o.gear || []) if (Math.random() < ENEMY_GEAR[key].drop) dropItems(lane, o, key, 1);
     if (brute) { dropCoins(lane, o); if (Math.random() < BRUTE.axeDrop) dropItems(lane, o, 'axe', 1); }
     // the enemy's body snaps apart into flying sticks
     if (fish) splash(lane, o.d, gy, 0.6);
@@ -1804,6 +1864,28 @@ function reachFor(sx, sy, tx, ty, len = 14) {
   return lowFwd(p) >= lowFwd(q) ? p : q;
 }
 
+// How gear looks when worn. `on` is the body part it's drawn around; `draw` paints it with that part
+// at (0, 0), upright and facing +x (a head is a 10px circle).
+const RUST = { base: '#8a4a24', dark: '#5c2d14', light: '#c46f33' };
+const WORN = {
+  rustedHelmet: { on: 'head', draw: () => {
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.fillStyle = RUST.base; ctx.strokeStyle = INK; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-11, -2); ctx.bezierCurveTo(-11, -17, 11, -17, 11, -2); ctx.closePath(); ctx.fill(); ctx.stroke();  // dome
+    ctx.beginPath(); ctx.roundRect(-14, -3.5, 30, 4, 2); ctx.fill(); ctx.stroke();  // brim, sticking out further in front
+    ctx.fillStyle = RUST.light;  // rust blooms
+    ctx.beginPath(); ctx.ellipse(-4, -9, 3, 2, -0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(5, -6, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = RUST.dark;
+    ctx.beginPath(); ctx.arc(2, -11, 1.4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(-8, -4.5, 1.1, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = RUST.dark; ctx.lineWidth = 1.3;  // a dent and a crack
+    ctx.beginPath(); ctx.arc(-1, -16, 4, 0.5, 2.6); ctx.stroke();
+    seg(7, -9, 9, -5); seg(9, -5, 8, -3);
+    ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(9.5, -1.5, 1.2, 0, Math.PI * 2); ctx.fill();  // rivet
+  } },
+};
+
 function drawStick(x, gy, pose) {
   // `club` (or `grip`, for a gun) puts both hands on a held weapon: `reach` is where the arms point,
   // `a` the weapon's angle, `len` how far out the front hand is and `hold` how far up it the other is
@@ -1862,7 +1944,14 @@ function drawStick(x, gy, pose) {
   if (toss >= 0) fistTrail(k => fistAt(tossArm(k, aim), shX, shY), Math.max(0, toss - 0.35), Math.min(toss, 0.6), 0.5);
   for (const [a1, a2] of arms) { const e = limb(shX, shY, a1, 14); const h = limb(e[0], e[1], a2, 14); hand = hand || h; }
   if (two) hand = [shX + Math.sin(two.reach) * reachLen, shY + Math.cos(two.reach) * reachLen, shX, shY];
-  ctx.beginPath(); ctx.arc(nx + Math.sin(Math.PI - torsoA) * 10, ny + Math.cos(Math.PI - torsoA) * 10, 10, 0, Math.PI * 2); ctx.fill();
+  const headX = nx + Math.sin(Math.PI - torsoA) * 10, headY = ny + Math.cos(Math.PI - torsoA) * 10;
+  ctx.beginPath(); ctx.arc(headX, headY, 10, 0, Math.PI * 2); ctx.fill();
+  // worn gear, drawn around the head (or, later, the torso and feet) and tilting with the body
+  for (const key of pose.gear || []) {
+    const w = WORN[ITEMS[key].worn];
+    if (w.on !== 'head') continue;
+    ctx.save(); ctx.translate(headX, headY); ctx.rotate(torsoA); w.draw(); ctx.restore();
+  }
   if (punch >= 0) {  // a solid fist with speed lines riding along behind it, then a little pop at full reach
     const at = k => { const [fx, fy] = punchFist(k, alt); return [shX + fx, shY + fy]; }, f = at(punch);
     ctx.beginPath(); ctx.arc(f[0], f[1], 4.5, 0, Math.PI * 2); ctx.fill();
@@ -1888,7 +1977,7 @@ function drawEnemy(x, gy, o) {
     if (o.windT > 0) pose = { ...pose, windup: true, lean: -0.1 - 0.25 * (1 - o.windT / STAR.windup) };
     else if (o.relT > 0) pose = { ...pose, throwing: true, lean: 0.15 + 0.35 * (o.relT / THROW_REL_T) };
   }
-  drawStick(x, gy, pose);
+  drawStick(x, gy, { ...pose, gear: o.gear });
   if (thrower && o.relT > 0) {  // swoosh trailing the throwing hand
     ctx.save(); ctx.strokeStyle = '#ff3b3b'; ctx.lineCap = 'round';
     ctx.globalAlpha = o.relT / THROW_REL_T; ctx.lineWidth = 3;
@@ -1896,10 +1985,11 @@ function drawEnemy(x, gy, o) {
     ctx.restore();
   }
   ctx.restore();
-  if (thrower) {  // red headband with tails fluttering behind
+  const helmet = (o.gear || []).some(g => ITEMS[g].equip === 'head');
+  if (thrower) {  // red headband with tails fluttering behind (just the tails poke out from under a helmet)
     ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 3; ctx.lineCap = 'round';
     const wave = Math.sin(o.t * 10) * 3;
-    seg(x - 9, gy - 72, x + 9, gy - 72);
+    if (!helmet) seg(x - 9, gy - 72, x + 9, gy - 72);
     seg(x + 8, gy - 72, x + 22, gy - 70 + wave); seg(x + 8, gy - 71, x + 19, gy - 64 - wave);
   }
   if (thrower && o.windT > 0) {
@@ -1914,7 +2004,7 @@ function drawEnemy(x, gy, o) {
     ctx.beginPath(); ctx.arc(x, gy - 96, 3.5 * s, 0, Math.PI * 2); ctx.fill();
   }
   ctx.fillStyle = '#ff3b3b';
-  ctx.beginPath(); ctx.arc(x - 4, gy - 76, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x - 4, helmet ? gy - 68 : gy - 76, 2.5, 0, Math.PI * 2); ctx.fill();  // (peeking out under the brim)
 }
 
 // Four-point throwing star. `tint` marks whose it is (red: enemy, accent: yours, white: pickup).
@@ -2476,6 +2566,11 @@ function drawLane(lane, sky) {
       drawMelee(o.item, o.d - 20, gy + o.y + Math.sin(o.t * 3) * 2, -0.35, 0.9);
       ctx.restore();
     }
+    else if (o.type === 'item' && ITEMS[o.item].equip) {
+      ctx.save(); ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 14;
+      drawItemIcon(o.item, o.d, gy + o.y + Math.sin(o.t * 3) * 2, 0.75);
+      ctx.restore();
+    }
     else if (o.type === 'item') drawShuriken(o.d, gy + o.y + Math.sin(o.t * 3) * 2, o.t * 1.5, '#ffffff', true);
     else if (o.type === 'wave') drawWave(o, gy);
     else if (o.type === 'slash') {  // where a rage slam landed: a red claw-swipe that fades fast
@@ -2554,7 +2649,7 @@ function drawLane(lane, sky) {
       grip = { reach: Math.PI / 2 - aimA, a: aimA, lean: 0.08, len: 15 - kick, hold: 13 };
     }
     const hand = drawStick(player.off, gy + r.y, {
-      phase: player.phase, mode, deflect, club, grip, tilt: player.tilt,
+      phase: player.phase, mode, deflect, club, grip, tilt: player.tilt, gear: wornKeys(r),
       toss: throwing && deflect < 0 ? swingK(r) : -1, aim: r.aimA,
       punch: attackOf(r).anim === 'punch' && swinging && deflect < 0 ? swingK(r) : -1, alt: r.punchAlt });
     if (grip && hand) {
@@ -2710,6 +2805,9 @@ function drawItemIcon(key, x, y, s = 1, ink = '#f4efe6') {
   if (key === 'obliterator') { ctx.save(); drawObliterator(x - 14 * 0.42 * s, y + 6 * 0.42 * s, 0, 0.42 * s, ink); ctx.restore(); return; }
   if (key === 'axe') { const a = -0.8; return drawAxe(x - Math.cos(a) * 17 * s, y - Math.sin(a) * 17 * s, a, 0.58 * s, ink); }
   if (key === 'club') { const a = -0.8; return drawClub(x - Math.cos(a) * 17 * s, y - Math.sin(a) * 17 * s, a, 0.62 * s, ink); }
+  if (ITEMS[key] && ITEMS[key].worn) {  // gear shows as it looks worn, blown up
+    ctx.save(); ctx.translate(x, y + 9 * s); ctx.scale(1.55 * s, 1.55 * s); WORN[ITEMS[key].worn].draw(); ctx.restore(); return;
+  }
   ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
   ctx.strokeStyle = ctx.fillStyle = ink; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   if (key === 'fists') {
@@ -2742,6 +2840,17 @@ function drawItemIcon(key, x, y, s = 1, ink = '#f4efe6') {
     ctx.fillStyle = '#e8c9a8'; ctx.fillRect(-6, -7, 12, 14);       // the pad
     ctx.fillStyle = 'rgba(11,10,15,0.35)';
     for (const [px, py] of [[-14, -3], [-14, 3], [14, -3], [14, 3]]) { ctx.beginPath(); ctx.arc(px, py, 1.2, 0, Math.PI * 2); ctx.fill(); }
+  } else if (key === 'slot:head') {  // faint outlines marking empty equipment slots
+    ctx.beginPath(); ctx.moveTo(-14, 4); ctx.bezierCurveTo(-14, -18, 14, -18, 14, 4); ctx.closePath(); ctx.fill();
+    ctx.fillRect(-18, 2, 36, 5);
+  } else if (key === 'slot:chest') {
+    ctx.beginPath(); ctx.moveTo(-8, -15); ctx.lineTo(-18, -9); ctx.lineTo(-14, 1); ctx.lineTo(-11, -1); ctx.lineTo(-11, 15);
+    ctx.lineTo(11, 15); ctx.lineTo(11, -1); ctx.lineTo(14, 1); ctx.lineTo(18, -9); ctx.lineTo(8, -15); ctx.lineTo(0, -10); ctx.closePath(); ctx.fill();
+  } else if (key === 'slot:feet') {
+    for (const bx of [-13, 3]) { ctx.beginPath(); ctx.moveTo(bx, -14); ctx.lineTo(bx + 7, -14); ctx.lineTo(bx + 7, 6); ctx.lineTo(bx + 13, 9); ctx.lineTo(bx + 13, 14); ctx.lineTo(bx - 1, 14); ctx.closePath(); ctx.fill(); }
+  } else if (key === 'slot:accessory') {
+    ctx.lineWidth = 4.5; ctx.beginPath(); ctx.arc(0, 4, 10, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(6, -8); ctx.lineTo(0, -3); ctx.lineTo(-6, -8); ctx.closePath(); ctx.fill();
   } else if (key === 'pebble') {
     ctx.beginPath(); ctx.moveTo(-14, 4); ctx.lineTo(-9, -8); ctx.lineTo(3, -12); ctx.lineTo(13, -5); ctx.lineTo(14, 6); ctx.lineTo(4, 11); ctx.lineTo(-9, 10);
     ctx.closePath(); ctx.fill();
@@ -2752,7 +2861,8 @@ function drawItemIcon(key, x, y, s = 1, ink = '#f4efe6') {
 
 // One inventory slot at (x, y), s px square. `keyLabel` marks a hotbar slot (with its hotkey);
 // an empty hotbar slot shows a faint fist, since that's what you attack with from it.
-function drawSlot(x, y, s, stack, { selected = false, accent = '#ffffff', keyLabel = null, lifted = false, count = true, cd = null } = {}) {
+// An empty equipment slot shows a faint outline of what goes in it (`ghost`).
+function drawSlot(x, y, s, stack, { selected = false, accent = '#ffffff', keyLabel = null, lifted = false, count = true, cd = null, ghost = null } = {}) {
   ctx.save();
   ctx.fillStyle = selected ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.07)';
   ctx.beginPath(); ctx.roundRect(x, y, s, s, s * 0.16); ctx.fill();
@@ -2766,8 +2876,8 @@ function drawSlot(x, y, s, stack, { selected = false, accent = '#ffffff', keyLab
       ctx.lineWidth = 4; ctx.strokeStyle = INK; ctx.lineJoin = 'round'; ctx.fillStyle = '#fff';
       ctx.strokeText(stack.n, x + s - 5, y + s - 6); ctx.fillText(stack.n, x + s - 5, y + s - 6);
     }
-  } else if (keyLabel && !lifted) {
-    ctx.globalAlpha = 0.22; drawItemIcon('fists', x + s / 2, y + s / 2, s / 58); ctx.globalAlpha = 1;
+  } else if ((keyLabel || ghost) && !lifted) {
+    ctx.globalAlpha = 0.22; drawItemIcon(ghost ? 'slot:' + ghost : 'fists', x + s / 2, y + s / 2, s / 58); ctx.globalAlpha = 1;
   }
   if (stack && !lifted && cd) {  // on cooldown: a dark shade that drains from the top, with the seconds left
     ctx.save(); ctx.beginPath(); ctx.roundRect(x, y, s, s, s * 0.16); ctx.clip();
@@ -2839,16 +2949,21 @@ function drawHotbars() {
 // The pause screen: each runner's inventory in its own half of the screen, hotbar on top, bag below.
 function menuLayout() {
   // panels shrink to leave room for the shop column in the middle
-  const S = Math.round(Math.max(34, Math.min(64, (W / 2 - shopWidth() - 68) / (BAG_COLS * 1.12), (H - 300) / 5.4))), G = Math.round(S * 0.16);
+  const S = Math.round(Math.max(34, Math.min(64, (W / 2 - shopWidth() - 68) / (BAG_COLS * 1.12), (H - Math.max(90, H * 0.16) - 280) / 6.4))), G = Math.round(S * 0.16);
   const rowW = n => n * S + (n - 1) * G, top = Math.max(90, H * 0.16);
   return [-1, 1].map(side => {
     const cx = W / 2 + side * (shopWidth() / 2 + 16 + (rowW(BAG_COLS) + 44) / 2), slots = [];
-    const hotY = top + 112, bagY = hotY + S + 44;
+    const hotY = top + 112, bagY = hotY + S + 44, armorY = bagY + rowW(BAG / BAG_COLS) + 40, accY = armorY + S + 34;
     for (let i = 0; i < HOTBAR; i++) slots.push({ side, i, x: cx - rowW(HOTBAR) / 2 + i * (S + G), y: hotY, s: S });
     for (let j = 0; j < BAG; j++)
       slots.push({ side, i: HOTBAR + j, x: cx - rowW(BAG_COLS) / 2 + (j % BAG_COLS) * (S + G), y: bagY + Math.floor(j / BAG_COLS) * (S + G), s: S });
+    // equipment: helmet, chest and boots on one row, the accessories on the next
+    EQUIP.forEach((_, j) => {
+      const row = j < ARMOR ? 0 : 1, k = row ? j - ARMOR : j, n = row ? EQUIP.length - ARMOR : ARMOR;
+      slots.push({ side, i: EQUIP0 + j, x: cx - rowW(n) / 2 + k * (S + G), y: row ? accY : armorY, s: S });
+    });
     const pad = 22, w = rowW(BAG_COLS) + pad * 2;
-    return { side, cx, top, hotY, bagY, slots, box: { x: cx - w / 2, y: top, w, h: bagY + rowW(BAG / BAG_COLS) + pad - top } };
+    return { side, cx, top, hotY, bagY, armorY, accY, slots, box: { x: cx - w / 2, y: top, w, h: accY + S + pad - top } };
   });
 }
 function menuSlotAt(px, py) {
@@ -2936,7 +3051,7 @@ function drawInventory() {
   ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
   ctx.font = '900 40px system-ui, sans-serif'; ctx.fillText('PAUSED', W / 2, Math.max(50, H * 0.16 - 34));
   ctx.font = '500 15px system-ui, sans-serif'; ctx.globalAlpha = 0.6;
-  ctx.fillText('Esc to resume   ·   drag items to organize   ·   click a hotbar slot to hold it   ·   buy with ◀ / ▶ to pick who gets it', W / 2, Math.max(50, H * 0.16 - 34) + 26);
+  ctx.fillText('Esc to resume   ·   drag items to organize   ·   click a hotbar slot to hold it   ·   click armor to wear it   ·   buy with ◀ / ▶ to pick who gets it', W / 2, Math.max(50, H * 0.16 - 34) + 26);
   ctx.globalAlpha = 1;
   const layout = menuLayout();
   for (const p of layout) {
@@ -2957,9 +3072,16 @@ function drawInventory() {
     ctx.font = '700 12px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.textAlign = 'left';
     ctx.fillText('HOTBAR', p.slots[0].x, p.hotY - 10);
     ctx.fillText('BAG', p.slots[HOTBAR].x, p.bagY - 10);
+    ctx.fillText('ARMOR', p.slots[EQUIP0].x, p.armorY - 10);
+    ctx.fillText('ACCESSORIES', p.slots[EQUIP0 + ARMOR].x, p.accY - 10);
+    const def = gearStat(r, 'defense');  // total defense from everything worn
+    ctx.textAlign = 'right'; ctx.fillStyle = def ? '#fff' : 'rgba(255,255,255,0.45)';
+    const last = p.slots[EQUIP0 + ARMOR - 1];
+    ctx.fillText(`DEFENSE ${def}`, last.x + last.s, p.armorY - 10);
     for (const s of p.slots) {
       const lifted = menu.drag && menu.drag.side === p.side && menu.drag.i === s.i;
-      drawSlot(s.x, s.y, s.s, r.inv[s.i], { selected: s.i === r.slot, accent, keyLabel: s.i < HOTBAR ? hotkey(p.side, s.i) : null, lifted, cd: cooldownOf(r, r.inv[s.i]) });
+      drawSlot(s.x, s.y, s.s, r.inv[s.i], { selected: s.i === r.slot, accent, keyLabel: s.i < HOTBAR ? hotkey(p.side, s.i) : null, lifted, cd: cooldownOf(r, r.inv[s.i]),
+                                            ghost: s.i >= EQUIP0 ? EQUIP[s.i - EQUIP0] : null });
     }
   }
   drawShop();
@@ -3000,6 +3122,13 @@ function drawTooltip(it, stack, price = 0) {
     if (it.aoe) rows.push([`${it.aoe} blast radius (can hit you too)`, '600 15px', '#fff'], ['Explodes on the 2nd bounce or on contact', '600 15px', '#fff']);
     if (it.beam) rows.push(['Sprays laser bolts (they fly through platforms)', '600 15px', '#fff']);
     if (it.auto) rows.push(['Hold the mouse to keep firing', '600 15px', '#fff']);
+  }
+  if (it.equip) {
+    const st = it.stats || {};
+    rows.push(['', '6px']);
+    if (st.defense) rows.push([`+${st.defense} defense`, '700 15px', '#fff'],
+                              [`Halves the first ${st.defense} damage of every hit`, '600 13px', 'rgba(255,255,255,0.6)']);
+    rows.push([`Worn in the ${SLOT_NAMES[it.equip]} slot`, '600 13px', 'rgba(255,255,255,0.5)']);
   }
   if (it.heal) rows.push(['', '6px'], [`Restores ${it.heal} HP when used`, '600 15px', '#fff']);
   if (it.cooldown) rows.push([`${it.cooldown}s cooldown`, '600 15px', '#fff']);
