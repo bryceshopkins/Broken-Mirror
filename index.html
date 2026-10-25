@@ -935,10 +935,11 @@ function update(dt) {
   // Movement: A/D move both runners back/forward along their lanes (mirrored).
   const walking = strolling();
   if (walking) jumpPressed = punchPressed = false;
-  const move = frozen || walking ? 0 : (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
+  const held = outpost && outpost.state === 'pass' && outpost.lock;  // (holding their place while a shop goes by)
+  const move = frozen || walking || held ? 0 : (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
   player.moving = move !== 0 || walking;
   // ease into a slight lean: forward when pushing ahead, back when braking
-  player.tilt += ((move > 0 ? 0.20 : move < 0 ? -0.20 : 0) - player.tilt) * Math.min(1, dt * 7);
+  player.tilt += ((held ? outpost.lean : move > 0 ? 0.20 : move < 0 ? -0.20 : 0) - player.tilt) * Math.min(1, dt * 7);
   if (walking) {}  // (the shop walks them in; see updateOutpost)
   else if (boss && boss.state !== 'approach' && boss.state !== 'exit') {
     // in the arena you can walk right up to the boss, but not through him
@@ -1584,7 +1585,7 @@ const CHECKPOINT = {
   every: 10000,       // px between checkpoints (1000 m)
   halfW: 230,         // half the building's width; it's centered on the seam
   doorAt: 0.5,        // how far out from the seam each door is (fraction of halfW)
-  slow: 110,          // the world's speed while a shop is on screen, so there's plenty of time to go in (px/s)
+  slow: 0.75,         // x normal running speed while a shop is on screen, so there's more time to go in
   hurry: 1.6,         // holding D (forward) past a shop speeds it up to this x normal running speed instead
   ease: 2.5,          // how quickly the speed eases between those (per s)
   brake: 900,         // how hard the world stops when you go in (px/s per s)
@@ -1666,9 +1667,14 @@ function updateOutpost(dt, gy) {
   if (!o.reached && shopOnScreen(o)) { o.reached = true; reachCheckpoint(o.k); }
   if (o.state === 'pass') {
     // slow to a jog while it's on screen (or hurry past it, holding D), then back up to speed once it's behind them
+    // While it's going by they hold their place on screen (A/D don't move them), so hurrying past
+    // doesn't leave them out of position, and they lean back to brake or forward to hurry.
     const behind = o.d + CHECKPOINT.halfW < player.off;
-    const want = behind ? runSpeed() : keys['d'] ? runSpeed() * CHECKPOINT.hurry : shopOnScreen(o) ? CHECKPOINT.slow : runSpeed();
-    o.v += (want - o.v) * Math.min(1, CHECKPOINT.ease * dt);
+    o.lock = shopOnScreen(o) && !behind;
+    const want = behind || !o.lock ? runSpeed() : keys['d'] ? runSpeed() * CHECKPOINT.hurry : runSpeed() * CHECKPOINT.slow;
+    const dv = (want - o.v) * Math.min(1, CHECKPOINT.ease * dt);
+    o.v += dv;
+    o.lean = keys['d'] ? 0.2 : dv / dt < -8 ? -0.16 : 0;
     o.d -= speed * dt;
     if (o.d + CHECKPOINT.halfW < -60) leaveOutpost();
   } else if (o.state === 'enter') {
