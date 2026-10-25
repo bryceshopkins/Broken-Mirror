@@ -112,6 +112,7 @@ function skipBoss() {  // straight to the post-Gronk run (brutes start showing u
   if (game.bossDefeated) return;
   if (boss) { boss = null; lanes.forEach(l => { l.obs = l.obs.filter(o => o.type === 'coin' || o.type === 'item' || o.type === 'health'); }); }
   game.bossDefeated = true; nextBeat = 300; nextPlatform = 800;
+  game.nextBiome = Math.max(game.nextBiome, distance + BIOME.gap[0] / 2);
   debugNote('GRONK SKIPPED');
 }
 const DEBUG_KEYS = [
@@ -133,7 +134,19 @@ const DEBUG_KEYS = [
   { key: '0', label: 'Start Gronk (boss)', run: () => { if (!boss && !game.bossDefeated) startBoss(); } },
   { key: 'p', label: 'Skip Gronk (post-boss run)', run: skipBoss },
   { key: 'r', label: 'Restart run', any: true, run: () => startGame() },
+  // T / C: a tunnel or cave starts sloping in just ahead (N: the one you're in starts sloping back out)
+  { key: 't', label: 'Tunnel now', run: () => debugBiome('tunnel') },
+  { key: 'c', label: 'Cave now', run: () => debugBiome('cave') },
+  { key: 'n', label: 'Back to open sky', run: () => {
+    const b = game.biome;
+    if (b) b.end = Math.min(b.end, Math.max(b.start + 2 * BIOME.ramp, distance + W / 2 + BIOME.ramp));
+  } },
 ];
+function debugBiome(kind) {
+  if (boss) return debugNote('NOT DURING GRONK');
+  startBiome(kind, true);
+  debugNote(kind.toUpperCase() + ' AHEAD');
+}
 // Menu-only extras: jump to a point in the run, or tweak the runners.
 const DEBUG_SKIPS = [
   { label: 'Fresh run', run: () => startGame() },
@@ -196,6 +209,7 @@ function buildDebugMenu() {
       ${TIME_STEPS.map(v => `<button data-time="${v}"${v === debug.timeScale ? ' class="on"' : ''}>${v}x</button>`).join('')}${keyed(3, 4)}</div>
     <h3>Skip to</h3><div class="grid">${DEBUG_SKIPS.slice(0, 6).map((d, i) => btn(d, i, 's')).join('')}</div>
     <h3>Spawn and give</h3><div class="grid">${keyed(4, 12)}</div>
+    <h3>Biomes</h3><div class="grid">${keyed(16, 19)}</div>
     <h3>Run</h3><div class="grid">${keyed(13, 16)}</div>
   </div>`;
 }
@@ -307,7 +321,7 @@ const MAX_HP = 100, INVULN_T = 1.2;  // s of invulnerability after a hit (each r
 // enemies sometimes drop (only while that runner is hurt), and a few big ones from every boss.
 const REGEN = { delay: 5, rate: 0.35 };  // s after a hit before it starts; HP per second
 const HEALTH_DROP = { chance: 0.08, enemyHeal: 10, bossHeal: 25, bossCount: 2 };
-const DAMAGE = { brute: 25, axe: 35, enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45, piranha: 20 };
+const DAMAGE = { cspike: 20, brute: 25, axe: 35, enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45, piranha: 20 };
 const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5, waterDrag: 0.35 };  // thrown at chest height; waterDrag = speed kept underwater
 const SHURIKEN_DROP_WEIGHTS = [25, 35, 25, 10, 5];  // index = how many a thrower drops (0-4)
 // Brutes show up once Gronk is down: slow and thick, swinging a huge axe in an overhead arc that
@@ -381,6 +395,7 @@ function startGame() {
   particles = []; popups = []; labels = []; impact = null;
   shake = 0; distance = 0; speed = BASE_SPEED; nextBeat = 400; nextPlatform = 1100; time = 0;
   boss = null; game.bossDefeated = false; game.bossCheck = BOSS.checkEvery; game.fadeIn = 0;
+  game.biome = null; game.nextBiome = between(BIOME.first);
   game.state = 'play'; setPaused(false);
 }
 
@@ -423,6 +438,101 @@ let wallet = 0;
 try { wallet = Number(localStorage.getItem('mirrorrun.wallet')) || 0; } catch (e) {}
 function saveWallet() { try { localStorage.setItem('mirrorrun.wallet', wallet); } catch (e) {} }
 
+// ---------- Biomes ----------
+// Most of the run is open sky, but every so often both worlds run into a stretch of somewhere else:
+//   tunnel  a flat rock ceiling that steps down and up between heights, over a raised floor, with
+//           spikes hanging off it (low enough in places to catch a full jump, or someone on a platform)
+//   cave    like Gronk's lair: a jagged roof of stalactites, a bumpy floor and a lot more water
+// They slope in and out smoothly, only one is ever on the course, and they never overlap the boss
+// arena. Positions are world distance (w = distance + lane d), so their shape scrolls with the ground.
+// Heights (h) are px above the normal floor line; they all leave room to jump and stand on platforms.
+const BIOME = {
+  first: [5000, 9000], gap: [9000, 16000],  // open running before the first one, and between them
+  len: { tunnel: [2600, 3800], cave: [2800, 4200] },
+  ramp: 420,                                // length of the slope in and out
+  tunnel: { lift: 40, step: 620, blend: 120, h: [205, 290], spikes: 0.55 },
+  cave: { h: [225, 295], tooth: 46, toothDepth: [8, 38], bump: 9, spikes: 0.2, pond: 0.4 },
+  spike: 26,                                // how far a ceiling spike hangs down
+};
+const hash01 = n => Math.abs(Math.sin(n * 12.9898 + 78.233) * 43758.5453) % 1;  // fixed pseudo-random 0-1
+const smooth01 = k => { k = Math.max(0, Math.min(1, k)); return k * k * (3 - 2 * k); };
+// The biome at lane distance d, with k = how far in (0 out in the open, 1 all the way in, between on the slopes).
+function biomeAt(d) {
+  const b = game.biome, w = distance + d;
+  if (!b || w <= b.start || w >= b.end) return null;
+  return { b, w, k: smooth01(Math.min(w - b.start, b.end - w) / BIOME.ramp) };
+}
+// Does a biome (of this kind, if given) cover any of lane distances a-b?
+const biomeOver = (a, b, kind = null) => !!game.biome && (!kind || game.biome.kind === kind) &&
+  distance + b > game.biome.start && distance + a < game.biome.end;
+// How far the floor is raised at d (negative = up), not counting holes or ponds. Cave bumps flatten
+// out around ponds, so the water always sits at the normal floor line.
+function groundLift(lane, d) {
+  const z = biomeAt(d);
+  if (!z) return 0;
+  if (z.b.kind === 'tunnel') return -BIOME.tunnel.lift * z.k;
+  const s = z.b.seed;
+  let bump = (Math.sin(z.w / 97 + s) * 0.6 + Math.sin(z.w / 41 + s * 2.3) * 0.4) * BIOME.cave.bump * z.k;
+  for (const p of lane.obs) if (p.type === 'pond' && !p.dead) bump *= smooth01((Math.abs(d - p.d) - p.len / 2) / 90);
+  return bump;
+}
+// The ceiling's y at d (negative = up, like everything else), or null under open sky. On the slopes it
+// comes down from above the top of the screen.
+function ceilingAt(d) {
+  const z = biomeAt(d);
+  if (!z) return null;
+  const { b, k } = z, u = z.w - b.start;
+  let h, lift = 0;
+  if (b.kind === 'tunnel') {  // flat stretches at different heights, with short slopes between them
+    const T = BIOME.tunnel, i = Math.floor(u / T.step), f = u - i * T.step;
+    const level = n => T.h[0] + hash01(b.seed + n) * (T.h[1] - T.h[0]);
+    h = level(i) + (level(i + 1) - level(i)) * smooth01((f - (T.step - T.blend)) / T.blend);
+    lift = T.lift * k;
+  } else {  // a wavy roof with a stalactite in every cell
+    const C = BIOME.cave, i = Math.floor(u / C.tooth), f = (u - i * C.tooth) / C.tooth;
+    h = C.h[0] + (C.h[1] - C.h[0]) * (0.5 + 0.3 * Math.sin(u / 310 + b.seed) + 0.2 * Math.sin(u / 133 + b.seed * 1.7));
+    h -= (C.toothDepth[0] + hash01(b.seed * 3 + i) * (C.toothDepth[1] - C.toothDepth[0])) * Math.max(0, 1 - Math.abs(f - 0.5) / 0.3);
+  }
+  return -lift - ((groundY() + 120) * (1 - k) + h * k);
+}
+// The lowest bit of ceiling over a box from d0 to d1 (null if it's all open).
+function roofOver(d0, d1) {
+  let lo = null;
+  for (let x = d0; x <= d1 + 0.01; x += (d1 - d0) / 2 || 1) { const c = ceilingAt(x); if (c !== null && (lo === null || c > lo)) lo = c; }
+  return lo;
+}
+// A new biome somewhere ahead: past everything already on the course (so no ledge or hole ends up
+// inside it), or, from the debug menu, coming in right in front of the runners.
+function startBiome(kind, now = false) {
+  if (boss) return false;
+  let ahead = W / 2 + 150;
+  if (now) {
+    ahead = W / 2 - 160;
+    // clear terrain out of the way (but not from under the runner), and floor clutter that would end up sunk into the raised floor
+    const clear = o => (['ledge', 'tunnel', 'pond'].includes(o.type) && o.d + o.len / 2 > player.off + 20) || (o.pond && o.pond.d + o.pond.len / 2 > player.off + 20) ||
+                       ((['block', 'spike', 'bar', 'platform'].includes(o.type) || (o.type === 'enemy' && !o.walks)) && o.d + (o.len || 0) / 2 > ahead - 40);
+    for (const lane of lanes) lane.obs = lane.obs.filter(o => !clear(o) && !(o.pond && clear(o.pond)));
+  } else for (const lane of lanes) for (const o of lane.obs) ahead = Math.max(ahead, o.d + (o.len || 0) / 2 + 200);
+  const len = between(BIOME.len[kind]);
+  game.biome = { kind, start: distance + ahead, end: distance + ahead + len, seed: Math.floor(Math.random() * 1000) };
+  return true;
+}
+// Called every frame: retire a biome once it's behind the runners, and now and then roll a new one.
+function updateBiome() {
+  const b = game.biome;
+  if (b && b.end < distance - 60) { game.biome = null; game.nextBiome = distance + between(BIOME.gap); }
+  if (!game.biome && !boss && distance >= game.nextBiome) startBiome(Math.random() < 0.5 ? 'tunnel' : 'cave');
+}
+// Spikes hanging off a fully-formed ceiling, kept clear of anything on the floor you'd need to jump.
+function spawnCeilingSpike(lane, extra) {
+  const d = W / 2 + 60 + extra, z = biomeAt(d - 30), z2 = biomeAt(d + 30);
+  if (!z || !z2 || z.k < 1 || z2.k < 1) return null;
+  if (lane.obs.some(o => (o.type === 'block' || o.type === 'spike' || o.type === 'bar' || o.type === 'cspike') && Math.abs(o.d - d) < 110)) return null;
+  const o = { type: 'cspike', d, y: roofOver(d - 16, d + 16), t: 0, dead: false, hit: false };
+  lane.obs.push(o);
+  return o;
+}
+
 // Height of any raised ground (ledge) covering lane-distance d, so new things sit on top of it.
 function ledgeLift(lane, d) {
   const l = lane.obs.find(o => o.type === 'ledge' && Math.abs(o.d - d) < o.len / 2);
@@ -441,7 +551,7 @@ function tunnelAt(lane, d) {
 // so climbing out is one continuous glide instead of a series of snaps.
 function floorAt(lane, d) {
   const hit = tunnelAt(lane, d);
-  if (!hit) { const p = pondAt(lane, d); return p ? pondDepth(p, d) : 0; }
+  if (!hit) { const p = pondAt(lane, d); return p ? pondDepth(p, d) : groundLift(lane, d); }
   const { t, u } = hit, s = stairsStart(t);
   if (u < s) return t.depth;
   return t.depth * (1 - (u - s) / (t.len - s));
@@ -492,13 +602,13 @@ function spawnObstacle(lane, type, extra = 0, y = 0, placed = false) {
   if (isTerrain) {
     len = type === 'ledge' ? LEDGE.minLen + Math.random() * (LEDGE.maxLen - LEDGE.minLen)
                            : TUNNEL.minLen + Math.random() * (TUNNEL.maxLen - TUNNEL.minLen);
-    if (terrainOverlaps(lane, d - 40, d + len + 40)) return null;  // never stack terrain
+    if (terrainOverlaps(lane, d - 40, d + len + 40) || biomeOver(d - 40, d + len + 40)) return null;  // never stack terrain, or put it in a tunnel or cave
   } else if (!placed && type !== 'platform' && tunnelAt(lane, d) && !underRoof(lane, d)) {
     return null;  // would float over a hole
   }
   if (type === 'enemy' && nearBar(lane, d, 90)) return null;
   if (type === 'bar' && nearEnemy(lane, d, 120)) return null;
-  const lift = placed || isTerrain ? 0 : ledgeLift(lane, d);
+  const lift = placed || isTerrain ? 0 : ledgeLift(lane, d) - groundLift(lane, d);  // sits on a ledge, or a tunnel or cave floor
   const o = { type, d, y: y - lift, hit: false, dead: false, hp: ENEMY_HP, t: Math.random() * 6,
               walks: type === 'enemy' && !placed && (!kind || kind === 'brute') };
   if (kind === 'thrower') { o.kind = kind; o.throwCd = 0.05 + Math.random() * 0.25; o.windT = 0; o.relT = 0; }
@@ -514,7 +624,7 @@ function spawnObstacle(lane, type, extra = 0, y = 0, placed = false) {
     if (guard) spawnObstacle(lane, 'enemy', extra + o.gap + 50, o.depth, true);
   }
   if (type === 'platform') {
-    o.len = PLATFORM.len; o.h = PLATFORM.h + lift; o.y = 0; o.d += o.len / 2;
+    o.len = PLATFORM.len; o.h = PLATFORM.h + lift; o.y = 0; o.d += o.len / 2;  // (lift includes a raised tunnel floor)
     // coins along the top reward going up; sometimes an enemy guards them
     for (let i = 0; i < 6; i++) spawnObstacle(lane, 'coin', extra + 60 + i * 70, -o.h - 34, true);
     if (Math.random() < 0.6) spawnObstacle(lane, 'enemy', extra + o.len - 90, -o.h, true);
@@ -556,7 +666,7 @@ function spawnPond(lane, d0, depth = null, fish = null, force = false) {
                                  !['coin', 'item', 'health'].includes(o.type) && !(o.type === 'enemy' && o.walks)) o.dead = true;
     lane.obs = lane.obs.filter(o => !o.dead);
   }
-  if (terrainOverlaps(lane, d0 - 40, d0 + len + 40)) return null;
+  if (terrainOverlaps(lane, d0 - 40, d0 + len + 40) || biomeOver(d0 - 40, d0 + len + 40, 'tunnel')) return null;  // (no water on a tunnel's raised floor)
   const p = { type: 'pond', d: d0 + len / 2, len, depth, t: Math.random() * 6, y: 0, dead: false, hit: false };
   // clear static clutter that was already sitting where the water is
   for (const o of lane.obs) if (Math.abs(o.d - p.d) < len / 2 && !o.walks && o.type !== 'coin' && o.type !== 'item' && o.type !== 'health') o.dead = true;
@@ -581,11 +691,20 @@ function spawnPlatform() {
   if (Math.random() < 0.5) spawnObstacle(lanes[1 - i], 'enemy', 250);  // keep the other side busy
 }
 function spawnBeat() {
-  if (Math.random() < POND.chance && spawnPond(lanes[Math.random() < 0.5 ? 0 : 1], W / 2 + 60)) return;
+  const here = biomeAt(W / 2 + 60), inBiome = biomeOver(W / 2 - 40, W / 2 + 1100);
+  if (here && here.k >= 1) {  // spikes hanging off the ceiling (more of them in a tunnel)
+    const chance = BIOME[here.b.kind].spikes;
+    lanes.forEach(l => { if (Math.random() < chance) spawnCeilingSpike(l, 80 + Math.random() * 380); });
+  }
+  const pondChance = here && here.b.kind === 'cave' ? BIOME.cave.pond : POND.chance;  // caves are full of pools and puddles
+  if (Math.random() < pondChance && spawnPond(lanes[Math.random() < 0.5 ? 0 : 1], W / 2 + 60)) return;
   const bruteOut = lanes.some(l => l.obs.some(o => o.kind === 'brute' && !o.dead));
-  const p = game.bossDefeated && !bruteOut && Math.random() < BRUTE.chance
-    ? BRUTE_PATTERNS[Math.floor(Math.random() * BRUTE_PATTERNS.length)]
-    : PATTERNS[Math.floor(Math.random() * Math.min(PATTERNS.length, 5 + distance / 2000))];
+  const terrainy = p => [...p[0], ...p[1]].some(t => t === 'ledge' || t === 'tunnel');
+  let p;
+  for (let tries = 0; tries < 8 && (!p || (inBiome && terrainy(p))); tries++)  // no ledges or holes in a tunnel or cave
+    p = game.bossDefeated && !bruteOut && Math.random() < BRUTE.chance
+      ? BRUTE_PATTERNS[Math.floor(Math.random() * BRUTE_PATTERNS.length)]
+      : PATTERNS[Math.floor(Math.random() * Math.min(PATTERNS.length, 5 + distance / 2000))];
   const flip = Math.random() < 0.5;
   [p[0], p[1]].forEach((o, i) => { if (o.length) spawnObstacle(lanes[flip ? 1 - i : i], o[0], o[1]); });
   if (Math.random() < 0.35) {  // a loose line of ground coins between beats
@@ -620,6 +739,7 @@ function updateRunner(lane, r, gy, dt) {
   const standing = sup.find(o => Math.abs(-supportTop(o) - r.y) < 1);
   if (r.grounded && !standing) {
     if (base > r.y + 1 && base - r.y <= STEP_H && pondAt(lane, player.off)) r.y = base;  // wade down a pond bank
+    else if (base > r.y + 1 && base - r.y <= 8) r.y = base;        // follow a gentle slope down (cave bumps, a tunnel's ramp)
     else if (base > r.y + 1) r.grounded = false;                   // floor dropped away (edge or hole)
     else if (base < r.y && r.y - base <= STEP_H + 4) r.y = base;   // walk up a stair step
   }
@@ -634,6 +754,12 @@ function updateRunner(lane, r, gy, dt) {
   if (r.grounded) return;
   r.vy += (keys['s'] ? GRAVITY * 2.4 : GRAVITY) * dt;  // S = fast fall
   r.y += r.vy * dt;
+  // a tunnel or cave ceiling: jump into it and you bonk your head and come back down
+  const roof = roofOver(player.off - 10, player.off + 10);
+  if (roof !== null && r.y - 70 < roof) {
+    r.y = roof + 70;
+    if (r.vy < 0) { r.vy = 0; burst(player.off, gy + roof, 5, 0.3, lane.side, '#ffffff'); }
+  }
   // land on the highest surface we fell onto this frame (a little forgiving)
   let floor = null;
   for (const o of sup) {
@@ -650,6 +776,7 @@ function obstacleBox(o, gy) {
   if (o.type === 'ledge') return { d0: o.d - o.len / 2, d1: o.d + o.len / 2, y0: gy - o.h, y1: gy };
   if (o.type === 'spike') return { d0: o.d - 16, d1: o.d + 16, y0: gy + o.y - 20, y1: gy + o.y };
   if (o.type === 'bar')   return { d0: o.d - 26, d1: o.d + 26, y0: 0, y1: gy + o.y - 46 };
+  if (o.type === 'cspike') return { d0: o.d - 15, d1: o.d + 15, y0: gy + o.y - 4, y1: gy + o.y + BIOME.spike - 4 };  // y is the ceiling it hangs from
   if (o.type === 'coin' || o.type === 'item' || o.type === 'health') return { d0: o.d - 14, d1: o.d + 14, y0: gy + o.y - 14, y1: gy + o.y + 14 };
   if (o.type === 'star' || o.type === 'grenade') return { d0: o.d - 9, d1: o.d + 9, y0: gy + o.y - 9, y1: gy + o.y + 9 };
   if (o.kind === 'piranha') return { d0: o.d - 15, d1: o.d + 15, y0: gy + o.y - 9, y1: gy + o.y + 9 };  // y is its middle
@@ -679,6 +806,7 @@ function update(dt) {
   distance += speed * dt;
   if (boss) updateBoss(dt, gy);
   else maybeStartBoss(dt);
+  updateBiome();
   if (debug.bossLow && boss && boss.alive) { debug.bossLow = false; boss.hp = Math.min(boss.hp, 25); }
   // During the boss intro and death everything but attacking is frozen.
   const frozen = boss && (boss.state === 'intro' || boss.state === 'dying');
@@ -947,6 +1075,7 @@ function updateDroppedCoin(lane, o, dt) {
   o.grace -= dt;
   if (o.vy === null) return;
   o.vy += 1400 * dt; o.y += o.vy * dt; o.d += o.vd * dt;
+  bounceOffCeiling(o, 14);
   let rest = surfaceAt(lane, o.d, o.y - 14);
   for (const p of lane.obs) if (p.type === 'platform' && Math.abs(p.d - o.d) < p.len / 2 && -p.h >= o.y - 20) rest = Math.min(rest, -p.h);
   if (o.vy > 0 && o.y >= rest - 14) {
@@ -955,6 +1084,11 @@ function updateDroppedCoin(lane, o, dt) {
   }
 }
 
+// Things flying upward under a tunnel or cave ceiling knock off it and drop back down.
+function bounceOffCeiling(o, r) {
+  const c = ceilingAt(o.d);
+  if (c !== null && o.vy < 0 && o.y - r < c) { o.y = c + r; o.vy *= -0.4; }
+}
 const overlaps = (a, b) => a.d0 < b.d1 && a.d1 > b.d0 && a.y0 < b.y1 && a.y1 > b.y0;
 
 // Brutes lumber forward and, once you're in reach (or right over them), wind up and swing.
@@ -1132,7 +1266,7 @@ function fireBolt(lane, r, key, fallbackA) {
   lane.obs.push({ type: 'bolt', item: key, d, y, vd: Math.cos(a) * v, vy: Math.sin(a) * v, t: 0, hits: new Set(), dead: false, hit: false });
   burst(d, groundY() + y, 3, 0.3, lane.side, '#ff2b6a');
 }
-const BOLT_STOPS = ['enemy', 'star', 'block', 'ledge', 'spike', 'bar'];
+const BOLT_STOPS = ['enemy', 'star', 'block', 'ledge', 'spike', 'bar', 'cspike'];
 function updateBolt(lane, o, dt, gy) {
   const x0 = o.d, y0 = gy + o.y;
   o.d += o.vd * dt; o.y += o.vy * dt; o.t += dt;
@@ -1149,11 +1283,11 @@ function updateBolt(lane, o, dt, gy) {
     const t = segEnter(x0, y0, x1, y1, bossBox(lane.side, gy));
     if (t >= 0 && t < first) { first = t; target = 'boss'; }
   }
-  // the ground (or the floor of a tunnel), checked at a few points along the way
+  // the ground (or the floor of a tunnel), and any ceiling, checked at a few points along the way
   for (let k = 1; k <= 4; k++) {
-    const t = k / 4;
+    const t = k / 4, x = x0 + (x1 - x0) * t, y = o.y - (1 - t) * o.vy * dt, c = ceilingAt(x);
     if (t >= first) break;
-    if (o.y - (1 - t) * o.vy * dt >= floorAt(lane, x0 + (x1 - x0) * t)) { first = t; target = 'ground'; break; }
+    if (y >= floorAt(lane, x) || (c !== null && y <= c)) { first = t; target = 'ground'; break; }
   }
   if (target) {
     const hx = x0 + (x1 - x0) * first, hy = y0 + (y1 - y0) * first, it = ITEMS[o.item];
@@ -1174,7 +1308,7 @@ function updateBolt(lane, o, dt, gy) {
 // laser bolts, they fly through floating platforms and tunnel roofs but shatter on anything solid: a
 // block, ledge, spikes, an overhead wall or the ground. (Enemy stars sail past the other enemies; yours
 // hit them, see update.) Under a pond's surface they slow right down, as if the water's dragging on them.
-const STAR_STOPS = ['block', 'ledge', 'spike', 'bar'];
+const STAR_STOPS = ['block', 'ledge', 'spike', 'bar', 'cspike'];
 function updateStar(lane, o, dt, gy) {
   const wet = o.y > 0 && !!pondAt(lane, o.d);
   if (wet !== !!o.wet) { spray(lane, o.d, gy, 8, 0.45, o.friendly ? 1 : -1); ripple(lane, o.d, 0.6); }  // in or out through the surface
@@ -1191,10 +1325,10 @@ function updateStar(lane, o, dt, gy) {
     const t = segEnter(x0, y0, x1, y1, obstacleBox(e, gy));
     if (t >= 0 && t < first) { first = t; hit = true; }
   }
-  for (let j = 1; j <= 4; j++) {  // the ground (a tunnel floor, a pond bed), at a few points along the way
-    const t = j / 4;
+  for (let j = 1; j <= 4; j++) {  // the ground (a tunnel floor, a pond bed) or a ceiling, at a few points along the way
+    const t = j / 4, x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t - gy, c = ceilingAt(x);
     if (t >= first) break;
-    if (y0 + (y1 - y0) * t - gy >= floorAt(lane, x0 + (x1 - x0) * t)) { first = t; hit = true; break; }
+    if (y >= floorAt(lane, x) || (c !== null && y <= c)) { first = t; hit = true; break; }
   }
   if (hit) shatterStar(lane, o, x0 + (x1 - x0) * first, y0 + (y1 - y0) * first);
 }
@@ -1211,6 +1345,7 @@ function shatterStar(lane, o, x, y) {
 // Grenades fly in an arc and bounce off whatever floor is under them; the second bounce sets them off.
 function updateGrenade(lane, o, dt, gy) {
   o.t += dt; o.vy += 1400 * dt; o.y += o.vy * dt; o.d += o.vd * dt;  // carried along at the runner's pace, like shurikens
+  bounceOffCeiling(o, 8);
   let rest = surfaceAt(lane, o.d, o.y - 8);
   for (const p of lane.obs) if (p.type === 'platform' && Math.abs(p.d - o.d) < p.len / 2 && -p.h >= o.y - 20) rest = Math.min(rest, -p.h);
   if (o.vy > 0 && o.y >= rest - 8) {
@@ -1260,7 +1395,7 @@ const bossSpotFor = side => (side < 0 ? player.off + BOSS.reach : W - player.off
 const SWINGS = ['swing', 'rageSwing'];  // states where the club is actually connecting
 
 function maybeStartBoss(dt) {
-  if (game.bossDefeated || time < BOSS.after) return;
+  if (game.bossDefeated || time < BOSS.after || game.biome) return;  // (never in a tunnel or cave)
   game.bossCheck -= dt;
   if (game.bossCheck > 0) return;
   game.bossCheck = BOSS.checkEvery;
@@ -1280,6 +1415,10 @@ const LAIR = {
 function startBoss() {
   let gateD = W / 2 + 150;  // past everything still on the course, so the lair is clear when they stop
   for (const lane of lanes) for (const o of lane.obs) gateD = Math.max(gateD, o.d + (o.len || 0) / 2 + 250);
+  // (only the debug menu can start him with a biome around: one that hasn't come into view yet is
+  // called off, otherwise the lair waits until the runners are out the other side of it)
+  if (game.biome && game.biome.start - distance > W / 2) game.biome = null;
+  if (game.biome) gateD = Math.max(gateD, game.biome.end - distance + 250);
   boss = { state: 'approach', t: 0, x: W / 2, y: -H, f: -1, target: Math.random() < 0.5 ? -1 : 1,
            hp: BOSS.hp, maxHp: BOSS.hp, attacks: 0, flashT: 0, swingHit: {}, zones: {}, endA: 0.4, barFill: 0,
            alive: false, arena: false, landed: false, stamped: false, exploded: false,
@@ -1469,7 +1608,7 @@ function updateBoss(dt, gy) {
       b.gateD -= speed * dt; b.exitD -= speed * dt;
       if (b.exitD < LAIR.stopAt) {
         boss = null; game.bossDefeated = true;
-        nextBeat = 300; nextPlatform = 800;
+        nextBeat = 300; nextPlatform = 800; game.nextBiome = Math.max(game.nextBiome, distance + BIOME.gap[0] / 2);
       }
       break;
     }
@@ -2160,6 +2299,45 @@ function drawLair(x0, x1, gy, half) {
   ctx.restore();
 }
 
+// Inside a tunnel or cave the light drops off, more the further in you are (drawn behind everything).
+function drawBiomeBack(lane, gy, half) {
+  const dark = game.biome.kind === 'cave' ? 0.62 : 0.5, g = ctx.createLinearGradient(-10, 0, half + 10, 0);
+  for (let i = 0; i <= 40; i++) {
+    const z = biomeAt(-10 + (half + 20) * i / 40);
+    g.addColorStop(i / 40, `rgba(8,6,12,${z ? (dark * z.k).toFixed(3) : 0})`);
+  }
+  ctx.fillStyle = g; ctx.fillRect(-10, -20, half + 20, gy + 40);
+}
+// The rock overhead: everything above the ceiling line filled in, with an edge picked out along it.
+// A tunnel's is flat and trimmed like the platforms; a cave's is jagged, with a few glowworms in it.
+function drawCeiling(lane, gy, sky, half) {
+  const b = game.biome, cave = b.kind === 'cave', step = cave ? 3 : 6, pts = [];
+  for (let x = -10; x <= half + 16; x += step) { const c = ceilingAt(x); pts.push([x, c === null ? -30 : Math.max(-30, gy + c)]); }
+  ctx.save();
+  ctx.fillStyle = INK; ctx.beginPath(); ctx.moveTo(-10, -30);
+  for (const [x, y] of pts) ctx.lineTo(x, y);
+  ctx.lineTo(half + 16, -30); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+  if (cave) { ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 2; ctx.stroke(); }
+  else {
+    ctx.strokeStyle = sky.accent; ctx.lineWidth = 3; ctx.stroke();
+    ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y + 6) : ctx.moveTo(x, y + 6)));  // a soft shadow under the trim
+    ctx.strokeStyle = 'rgba(11,10,15,0.35)'; ctx.lineWidth = 6; ctx.stroke();
+  }
+  if (cave) {  // glowworms tucked in up near the roof, gently pulsing in the lane's glow color
+    const C = BIOME.cave, u0 = distance - b.start;
+    for (let i = Math.floor((u0 - 20) / C.tooth); (i * C.tooth - u0) < half + 20; i++) {
+      if (i < 0 || hash01(b.seed * 7 + i) > 0.22) continue;
+      const x = i * C.tooth - u0 + C.tooth * (0.15 + hash01(i + b.seed) * 0.7), c = ceilingAt(x);
+      if (c === null || gy + c < 0) continue;
+      const y = gy + c - 6 - hash01(i * 3 + b.seed) * 14, a = 0.45 + 0.35 * Math.sin(time * 2.3 + i * 1.7);
+      ctx.shadowColor = sky.accent; ctx.shadowBlur = 10; ctx.fillStyle = `rgba(${sky.glow},${a.toFixed(2)})`;
+      ctx.beginPath(); ctx.arc(x, y, 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
 function drawLane(lane, sky) {
   const gy = groundY(), half = W / 2;
   ctx.save();
@@ -2170,10 +2348,17 @@ function drawLane(lane, sky) {
   // Distant hills
   ctx.fillStyle = sky.hill;
   for (const h of lane.hills) { ctx.beginPath(); ctx.arc(h.x, gy + 30, h.r, Math.PI, 0); ctx.fill(); }
-  // Ground
-  ctx.fillStyle = INK; ctx.fillRect(0, gy, half, H - gy);
+  // Ground (following a tunnel's raised floor or a cave's bumps when there's one in view)
+  const inView = biomeOver(-20, half + 20);
+  if (inView) drawBiomeBack(lane, gy, half);
+  ctx.fillStyle = INK;
+  if (inView) {
+    ctx.beginPath(); ctx.moveTo(-10, H);
+    for (let x = -10; x <= half + 16; x += 6) ctx.lineTo(x, gy + groundLift(lane, x));
+    ctx.lineTo(half + 16, H); ctx.closePath(); ctx.fill();
+  } else ctx.fillRect(0, gy, half, H - gy);
   ctx.fillStyle = 'rgba(255,255,255,0.06)';
-  for (let x = -(distance % 60); x < half; x += 60) ctx.fillRect(x, gy + 14, 26, 3);
+  for (let x = -(distance % 60); x < half; x += 60) ctx.fillRect(x, gy + 14 + (inView ? groundLift(lane, x + 13) : 0), 26, 3);
   if (boss) drawLair(boss.gateD, boss.exitD, gy, half);
 
   // terrain first, so everything else is drawn on top of it
@@ -2236,6 +2421,14 @@ function drawLane(lane, sky) {
       ctx.fillStyle = sky.accent; ctx.fillRect(x0, gy - o.h, o.len, 3);
       ctx.fillStyle = 'rgba(11,10,15,0.35)'; ctx.fillRect(x0 + 8, gy - o.h + 14, o.len - 16, 6);
     }
+    else if (o.type === 'cspike') {  // a rocky stub with three spikes pointing down, tipped like the floor spikes
+      ctx.fillRect(o.d - 17, -20, 34, by + 24);
+      ctx.beginPath();
+      for (let i = 0; i < 3; i++) { const x = o.d - 16 + i * 11; ctx.moveTo(x - 1, by + 2); ctx.lineTo(x + 5, by + BIOME.spike); ctx.lineTo(x + 11, by + 2); }
+      ctx.fill();
+      ctx.fillStyle = sky.accent;
+      for (let i = 0; i < 3; i++) ctx.fillRect(o.d - 12 + i * 11, by + BIOME.spike - 4, 2, 4);
+    }
     else if (o.type === 'bar') {
       ctx.fillRect(o.d - 26, 0, 52, by - 46);
       ctx.fillStyle = sky.accent; ctx.fillRect(o.d - 26, by - 52, 52, 6);
@@ -2295,6 +2488,7 @@ function drawLane(lane, sky) {
     else drawEnemy(o.d, gy + o.y, o);
   }
 
+  if (inView) drawCeiling(lane, gy, sky, half);
   // Gronk marks where his club is about to land, so you know whether to go up or down.
   if (boss && boss.zones[lane.side]) drawDangerZone(boss.zones[lane.side], gy);
 
