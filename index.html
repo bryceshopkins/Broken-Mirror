@@ -52,6 +52,8 @@ window.addEventListener('keydown', e => {
     if (k === '0' && !boss) startBoss();
     if (k === '-') lanes.forEach(l => { if (!l.body.inv.some(s => s && s.key === 'club') && addItem(l.body, 'club')) addLabel(l, 'club'); });
     if (k === 'b') lanes.forEach(l => spawnObstacle(l, 'brute'));
+    // O: a deep pond with piranhas just ahead of both runners (Shift+O: an ankle-deep one, to wade through)
+    if (k === 'o') lanes.forEach(l => spawnPond(l, player.off + 240, e.shiftKey ? 14 : 62, !e.shiftKey, true));
     if (k === 'x') lanes.forEach(l => { if (!l.body.inv.some(s => s && s.key === 'axe') && addItem(l.body, 'axe')) addLabel(l, 'axe'); });
     if (k === 'p' && !game.bossDefeated) {  // skip straight to the post-Gronk run (brutes start showing up)
       if (boss) { boss = null; lanes.forEach(l => { l.obs = l.obs.filter(o => o.type === 'coin' || o.type === 'item' || o.type === 'health'); }); }
@@ -194,7 +196,7 @@ const MAX_HP = 100, INVULN_T = 1.2;  // s of invulnerability after a hit (each r
 // enemies sometimes drop (only while that runner is hurt), and a few big ones from every boss.
 const REGEN = { delay: 5, rate: 0.35 };  // s after a hit before it starts; HP per second
 const HEALTH_DROP = { chance: 0.08, enemyHeal: 10, bossHeal: 25, bossCount: 2 };
-const DAMAGE = { brute: 25, axe: 35, enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45 };
+const DAMAGE = { brute: 25, axe: 35, enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45, piranha: 20 };
 const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5 };  // thrown at chest height
 const SHURIKEN_DROP_WEIGHTS = [25, 35, 25, 10, 5];  // index = how many a thrower drops (0-4)
 // Brutes show up once Gronk is down: slow and thick, swinging a huge axe in an overhead arc that
@@ -297,6 +299,11 @@ const LEDGE = { minLen: 400, maxLen: 950, minH: 42, maxH: 78 };
 // Lengths are along the lane; depth is how far below the floor the tunnel bottom is.
 const TUNNEL = { minLen: 520, maxLen: 860, depth: 120, gap: 120, roof: 12, stepW: 30, steps: 6 };
 const STEP_H = TUNNEL.depth / TUNNEL.steps;
+// Ponds: a rare dip in the ground full of water, anywhere from ankle-deep to nearly over your head.
+// You wade along the bottom (sloped banks in and out), throwing up splashes and ripples. Deep ones
+// can hide piranhas: frail, but they dart at your legs and leap at you if you try to jump over.
+const POND = { chance: 0.07, minLen: 240, maxLen: 420, minDepth: 10, maxDepth: 66, bank: 60 };
+const PIRANHA = { hp: 10, minDepth: 34, chance: 0.7, chase: 210, idle: 45, sight: 60, leap: 2.2, retreat: 0.7 };
 let wallet = 0;
 try { wallet = Number(localStorage.getItem('mirrorrun.wallet')) || 0; } catch (e) {}
 function saveWallet() { try { localStorage.setItem('mirrorrun.wallet', wallet); } catch (e) {} }
@@ -319,10 +326,17 @@ function tunnelAt(lane, d) {
 // so climbing out is one continuous glide instead of a series of snaps.
 function floorAt(lane, d) {
   const hit = tunnelAt(lane, d);
-  if (!hit) return 0;
+  if (!hit) { const p = pondAt(lane, d); return p ? pondDepth(p, d) : 0; }
   const { t, u } = hit, s = stairsStart(t);
   if (u < s) return t.depth;
   return t.depth * (1 - (u - s) / (t.len - s));
+}
+// Ponds: depth below the waterline at d, easing smoothly down each bank to the full depth.
+const pondAt = (lane, d) => lane.obs.find(o => o.type === 'pond' && !o.dead && Math.abs(o.d - d) < o.len / 2);
+function pondDepth(p, d) {
+  const u = d - (p.d - p.len / 2), b = Math.min(POND.bank, p.len * 0.3);
+  const k = Math.max(0, Math.min(1, u / b, (p.len - u) / b));
+  return p.depth * k * k * (3 - 2 * k);
 }
 const underRoof = (lane, d) => { const h = tunnelAt(lane, d); return h && h.u > h.t.gap && h.u < roofEnd(h.t); };
 
@@ -342,7 +356,7 @@ function surfaceAt(lane, d, y, hopsHoles = false) {
 // Terrain never stacks, and never slides in under a floating platform (that's what used to
 // leave platform guards hanging in the sky).
 const terrainOverlaps = (lane, a, b) =>
-  lane.obs.some(o => (o.type === 'ledge' || o.type === 'tunnel' || o.type === 'platform') &&
+  lane.obs.some(o => (o.type === 'ledge' || o.type === 'tunnel' || o.type === 'platform' || o.type === 'pond') &&
                      o.d + o.len / 2 > a && o.d - o.len / 2 < b);
 
 // `extra` pushes the obstacle further out; `y` lifts it (negative = up). Unless `placed`,
@@ -353,6 +367,9 @@ const nearEnemy = (lane, d, r) => lane.obs.some(o => o.type === 'enemy' && !o.de
 
 function spawnObstacle(lane, type, extra = 0, y = 0, placed = false) {
   const d = W / 2 + 60 + extra;
+  if (type === 'pond') return spawnPond(lane, d);
+  // nothing stands in the water but plain walkers wading through (coins can hang over it)
+  if (!placed && type !== 'coin' && type !== 'enemy' && pondAt(lane, d)) return null;
   let kind = null;
   if (type === 'thrower' || type === 'brute') { kind = type; type = 'enemy'; }
   const isTerrain = type === 'ledge' || type === 'tunnel';
@@ -414,12 +431,41 @@ function settleOnto(lane, t) {
   }
 }
 
+// A pond starting at lane distance d0. Random depth and size unless given; deep enough and it may
+// get a few piranhas. `force` clears whatever terrain or clutter is in the way (the testing hotkey).
+function spawnPond(lane, d0, depth = null, fish = null, force = false) {
+  const len = POND.minLen + Math.random() * (POND.maxLen - POND.minLen);
+  if (force) {  // (but never pull the ground out from under the runner)
+    for (const o of lane.obs) if (o.d + (o.len || 0) / 2 > d0 - 40 && o.d - (o.len || 0) / 2 < d0 + len + 40 && o.d - (o.len || 0) / 2 > player.off + 20 &&
+                                 !['coin', 'item', 'health'].includes(o.type) && !(o.type === 'enemy' && o.walks)) o.dead = true;
+    lane.obs = lane.obs.filter(o => !o.dead);
+  }
+  if (terrainOverlaps(lane, d0 - 40, d0 + len + 40)) return null;
+  if (depth === null) depth = POND.minDepth + Math.random() * (POND.maxDepth - POND.minDepth);
+  const p = { type: 'pond', d: d0 + len / 2, len, depth, t: Math.random() * 6, y: 0, dead: false, hit: false };
+  // clear static clutter that was already sitting where the water is
+  for (const o of lane.obs) if (Math.abs(o.d - p.d) < len / 2 && !o.walks && o.type !== 'coin' && o.type !== 'item' && o.type !== 'health') o.dead = true;
+  lane.obs.push(p);
+  if (fish === null) fish = depth >= PIRANHA.minDepth && Math.random() < PIRANHA.chance;
+  if (fish) {
+    const n = 1 + Math.floor(Math.random() * (depth > 50 ? 3 : 2));
+    for (let i = 0; i < n; i++) {
+      const hu = (Math.random() - 0.5) * (len - 2 * Math.min(POND.bank, len * 0.3));  // home spot, from the middle
+      lane.obs.push({ type: 'enemy', kind: 'piranha', pond: p, hu, d: p.d + hu, y: depth * (0.45 + Math.random() * 0.3),
+                      hp: PIRANHA.hp, face: -1, vy: 0, vd: 0, air: false, leapCd: 0.6 + Math.random(), retreat: 0,
+                      t: Math.random() * 6, dead: false, hit: false, walks: false });
+    }
+  }
+  return p;
+}
+
 function spawnPlatform() {
   const i = Math.random() < 0.5 ? 0 : 1;
   spawnObstacle(lanes[i], 'platform');
   if (Math.random() < 0.5) spawnObstacle(lanes[1 - i], 'enemy', 250);  // keep the other side busy
 }
 function spawnBeat() {
+  if (Math.random() < POND.chance && spawnPond(lanes[Math.random() < 0.5 ? 0 : 1], W / 2 + 60)) return;
   const bruteOut = lanes.some(l => l.obs.some(o => o.kind === 'brute' && !o.dead));
   const p = game.bossDefeated && !bruteOut && Math.random() < BRUTE.chance
     ? BRUTE_PATTERNS[Math.floor(Math.random() * BRUTE_PATTERNS.length)]
@@ -457,7 +503,8 @@ function updateRunner(lane, r, gy, dt) {
   const base = floorAt(lane, player.off);
   const standing = sup.find(o => Math.abs(-supportTop(o) - r.y) < 1);
   if (r.grounded && !standing) {
-    if (base > r.y + 1) r.grounded = false;                        // floor dropped away (edge or hole)
+    if (base > r.y + 1 && base - r.y <= STEP_H && pondAt(lane, player.off)) r.y = base;  // wade down a pond bank
+    else if (base > r.y + 1) r.grounded = false;                   // floor dropped away (edge or hole)
     else if (base < r.y && r.y - base <= STEP_H + 4) r.y = base;   // walk up a stair step
   }
   const onPlatform = standing && standing.type === 'platform';
@@ -489,6 +536,7 @@ function obstacleBox(o, gy) {
   if (o.type === 'bar')   return { d0: o.d - 26, d1: o.d + 26, y0: 0, y1: gy + o.y - 46 };
   if (o.type === 'coin' || o.type === 'item' || o.type === 'health') return { d0: o.d - 14, d1: o.d + 14, y0: gy + o.y - 14, y1: gy + o.y + 14 };
   if (o.type === 'star' || o.type === 'grenade') return { d0: o.d - 9, d1: o.d + 9, y0: gy + o.y - 9, y1: gy + o.y + 9 };
+  if (o.kind === 'piranha') return { d0: o.d - 15, d1: o.d + 15, y0: gy + o.y - 9, y1: gy + o.y + 9 };  // y is its middle
   if (o.kind === 'brute') return { d0: o.d - 24, d1: o.d + 24, y0: gy + o.y - 112, y1: gy + o.y };
   return { d0: o.d - 14, d1: o.d + 14, y0: gy + o.y - 72, y1: gy + o.y }; // enemy
 }
@@ -602,6 +650,7 @@ function update(dt) {
     for (const o of lane.obs) {
       if (o.type === 'slash') { o.t += dt; if (o.t > 0.35) o.dead = true; continue; }
       if (o.type === 'boom' || o.type === 'spark') { o.t += dt; o.d -= speed * dt; if (o.t > (o.type === 'boom' ? 0.4 : 0.12)) o.dead = true; continue; }
+      if (o.type === 'ripple') { o.t += dt; o.d -= speed * dt; if (o.t > o.life) o.dead = true; continue; }
       if (o.type === 'bolt') { updateBolt(lane, o, dt, gy); continue; }
       if (o.type === 'grenade') { updateGrenade(lane, o, dt, gy); continue; }
       if (o.type === 'wave') {  // boss slam shockwave: rolls toward you, then fizzles out
@@ -623,21 +672,25 @@ function update(dt) {
       o.d -= (speed + (walking ? step : 0)) * dt; o.t += dt;
       if (o.kind === 'thrower') updateThrower(lane, o, dt);
       if (o.kind === 'brute') updateBrute(lane, o, dt);
+      if (o.kind === 'piranha') updatePiranha(lane, o, dt, gy);
       // walking enemies follow the terrain: hop up onto raised ground, drop into holes
       if (o.walks) {
         const s = surfaceAt(lane, o.d, o.y, true);
         if (s < o.y) o.y = s;
         else if (s > o.y) o.y = Math.min(s, o.y + 500 * dt);
+        // wading enemies leave ripples too
+        if (o.y > 4 && (o.wadeT = (o.wadeT || 0) - dt) <= 0 && pondAt(lane, o.d)) { o.wadeT = 0.15; ripple(lane, o.d, 0.4 + Math.min(1, o.y / 60) * 0.5); }
       }
       if (o.grace !== undefined) updateDroppedCoin(lane, o, dt);
     }
-    const r = lane.body;
+    const r = lane.body, prevY = r.y, prevVy = r.vy;
     updateRunner(lane, r, gy, dt);
+    wade(lane, r, prevY, prevVy, gy, dt);
     const hitting = striking(r);
     const bodyH = r.sliding ? 34 : 70;
     const pb = { d0: player.off - 11, d1: player.off + 11, y0: gy + r.y - bodyH, y1: gy + r.y };
     for (const o of lane.obs) {
-      if (o.dead || o.type === 'platform' || o.type === 'tunnel' || o.type === 'slash' || o.type === 'bolt' || o.type === 'boom' || o.type === 'spark') continue;
+      if (o.dead || o.type === 'platform' || o.type === 'tunnel' || o.type === 'pond' || o.type === 'ripple' || o.type === 'slash' || o.type === 'bolt' || o.type === 'boom' || o.type === 'spark') continue;
       if (o.type === 'grenade') {  // goes off on contact with an enemy
         if (lane.obs.some(e => e.type === 'enemy' && !e.dead && overlaps(obstacleBox(o, gy), obstacleBox(e, gy)))) explode(lane, o, gy);
         continue;
@@ -717,6 +770,7 @@ function update(dt) {
         hurtRunner(lane, DAMAGE[o.kind] || DAMAGE[o.type] || DAMAGE.enemy, gy, o, o.type === 'enemy');
         // a brute doesn't fall over when he walks into you: he shoves you off and keeps coming
         if (o.kind === 'brute') { o.hit = false; if (o.d > player.off - 5) o.kb = Math.max(o.kb, 150 * BRUTE.kbDecay); }
+        if (o.kind === 'piranha') { o.hit = false; o.retreat = PIRANHA.retreat; }  // bites, backs off, comes back
       }
     }
     if (boss) bossVsRunner(lane, r, pb, hitting, gy);
@@ -732,7 +786,7 @@ function update(dt) {
   }
 
   particles.forEach(p => { p.vy += 1400 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; p.rot += (p.spin || 0) * dt; });
-  particles = particles.filter(p => p.life > 0);
+  particles = particles.filter(p => p.life > 0 && !(p.color === SPRAY && p.vy > 0 && p.y > groundY() + 3));  // spray drops back into the water
   shake *= Math.pow(0.002, dt);
 }
 
@@ -836,6 +890,60 @@ function updateThrower(lane, o, dt) {
   }
 }
 
+// Water. Ripples are flat rings spreading out on a pond's surface (drawn with the water, see drawWater).
+const SPRAY = '#cfefff';
+function ripple(lane, d, size = 1, delay = 0) {
+  lane.obs.push({ type: 'ripple', d, size, t: -delay, life: 0.6 + size * 0.35, dead: false, hit: false });
+}
+function splash(lane, d, gy, power) {
+  burst(d, gy, Math.round(6 + 14 * power), 0.35 + 0.45 * power, lane.side, SPRAY);
+  burst(d, gy, Math.round(3 + 6 * power), 0.25 + 0.3 * power, lane.side, '#ffffff');
+  ripple(lane, d, 0.8 + power * 0.6); ripple(lane, d, 0.6 + power * 0.5, 0.18);
+}
+// A runner in a pond: a splash going in or coming out through the surface, and while wading a steady
+// spray kicked up at the waterline with ripples trailing behind (more the deeper it is; sliding sprays the most).
+function wade(lane, r, prevY, prevVy, gy, dt) {
+  if (!pondAt(lane, player.off)) return;
+  if (prevY < 0 && r.y >= 0) splash(lane, player.off, gy, Math.min(1.5, 0.3 + Math.max(prevVy, 0) / 900));
+  else if (prevY >= 0 && r.y < 0) splash(lane, player.off, gy, 0.5);
+  if (r.y <= 1) return;
+  r.wadeT = (r.wadeT || 0) - dt;
+  if (r.wadeT > 0) return;
+  const deep = Math.min(1, r.y / 60);
+  r.wadeT = r.sliding ? 0.05 : 0.1 - deep * 0.03;
+  burst(player.off + 4, gy, r.sliding ? 5 : 2 + Math.round(deep * 3), 0.25 + deep * 0.3 + (r.sliding ? 0.25 : 0), lane.side, SPRAY);
+  ripple(lane, player.off, 0.5 + deep * 0.7);
+}
+// Piranhas circle their spot in the pond until a runner comes near, then dart at the legs. Jump over
+// the pond and they leap out after you. After a bite they back off for a moment, then come again.
+function updatePiranha(lane, o, dt, gy) {
+  const p = o.pond, r = lane.body;
+  if (p.dead) { o.dead = true; return; }
+  o.leapCd -= dt; o.retreat -= dt;
+  if (o.air) {  // out of the water: thrown through the air, then a splash back in
+    o.vy += 1400 * dt; o.y += o.vy * dt; o.d += o.vd * dt;
+    if (o.vy > 0 && o.y > 6) { o.air = false; o.vy = 0; splash(lane, o.d, gy, 0.45); }
+    return;
+  }
+  const b = Math.min(POND.bank, p.len * 0.3), x0 = p.d - p.len / 2 + b * 0.6, x1 = p.d + p.len / 2 - b * 0.6;
+  const near = player.off > x0 - PIRANHA.sight && player.off < x1 + PIRANHA.sight;
+  let tx = p.d + o.hu + Math.sin(o.t * 0.9) * 35, ty = p.depth * 0.55 + Math.sin(o.t * 1.7) * 6, v = PIRANHA.idle;
+  if (o.retreat > 0) { tx = o.d + 80; ty = p.depth; v = PIRANHA.chase; }
+  else if (near && r.y > -10) { tx = player.off + o.hu * 0.12; ty = r.y - 14 + o.hu * 0.05; v = PIRANHA.chase; }  // in the water: go for the legs
+  else if (near && r.y > -190 && Math.abs(player.off - o.d) < 80 && o.leapCd <= 0) {  // jumping over: leap out after them
+    o.air = true; o.leapCd = PIRANHA.leap + Math.random();
+    o.vy = -Math.sqrt(2 * 1400 * Math.min(210, o.y - r.y + 40)); o.vd = (player.off - o.d) * 1.2;
+    splash(lane, o.d, gy, 0.5);
+    return;
+  } else if (near) { tx = player.off; ty = 10; v = PIRANHA.chase * 0.7; }  // lurk just under the surface below them
+  const dx = tx - o.d, dy = ty - o.y, len = Math.hypot(dx, dy);
+  if (len > 1) { const s = Math.min(len, v * dt); o.d += dx / len * s; o.y += dy / len * s; }
+  if (Math.abs(dx) > 2) o.face = Math.sign(dx);
+  // stay in the water, out of the shallows
+  o.d = Math.max(x0, Math.min(x1, o.d));
+  o.y = Math.max(8, Math.min(pondDepth(p, o.d) - 7, o.y));
+}
+
 function rollWeighted(weights) {
   let r = Math.random() * weights.reduce((a, b) => a + b);
   for (let n = 0; n < weights.length; n++) if ((r -= weights[n]) < 0) return n;
@@ -859,8 +967,8 @@ function hitEnemy(o, lane, gy, weapon = PUNCH) {
   const crit = Math.random() < weapon.critChance;
   const dmg = Math.round((weapon.min + Math.random() * (weapon.max - weapon.min)) * (crit ? weapon.critMult : 1));
   o.hp -= dmg;
-  const fy = gy + o.y;  // the enemy's feet
-  const brute = o.kind === 'brute';
+  const brute = o.kind === 'brute', fish = o.kind === 'piranha';
+  const fy = gy + o.y + (fish ? 45 : 0);  // the enemy's feet (for a piranha, its middle is where a stick figure's chest would be)
   popups.push({ x: o.d, y: fy - (brute ? 135 : 90), vx: 40 + Math.random() * 60, vy: -260, text: dmg, crit,
                 side: lane.side, life: 1.0, age: 0 });
   if (o.hp <= 0) {
@@ -874,9 +982,10 @@ function hitEnemy(o, lane, gy, weapon = PUNCH) {
     if (o.kind === 'thrower') dropItems(lane, o, 'shuriken', rollWeighted(SHURIKEN_DROP_WEIGHTS));
     if (brute) { dropCoins(lane, o); if (Math.random() < BRUTE.axeDrop) dropItems(lane, o, 'axe', 1); }
     // the enemy's body snaps apart into flying sticks
-    for (let i = 0; i < (brute ? 10 : 6); i++) particles.push({
-      x: o.d, y: fy - 20 - Math.random() * 50, vx: 150 + Math.random() * 350, vy: -300 - Math.random() * 400,
-      life: 1.2, side: lane.side, stick: 12 + Math.random() * 8, rot: Math.random() * 6, spin: (Math.random() - 0.5) * 30 });
+    if (fish) splash(lane, o.d, gy, 0.6);
+    for (let i = 0; i < (brute ? 10 : fish ? 4 : 6); i++) particles.push({
+      x: o.d, y: fy - (fish ? 45 : 20 + Math.random() * 50), vx: 150 + Math.random() * 350, vy: -300 - Math.random() * 400,
+      life: 1.2, side: lane.side, stick: (fish ? 5 : 12) + Math.random() * 8, rot: Math.random() * 6, spin: (Math.random() - 0.5) * 30 });
   } else {
     // (no knockback, except on brutes: a hit that doesn't kill just sparks)
     burst(o.d, fy - (brute ? 65 : 45), 10, 0.8, lane.side);
@@ -968,7 +1077,7 @@ function explode(lane, o, gy) {
   o.dead = true;
   for (const e of lane.obs) {
     if (e.dead) continue;
-    if (e.type === 'enemy' && Math.hypot(e.d - cx, gy + e.y - 36 - cy) < R + 14) hitEnemy(e, lane, gy, it);
+    if (e.type === 'enemy' && Math.hypot(e.d - cx, gy + e.y - (e.kind === 'piranha' ? 0 : 36) - cy) < R + 14) hitEnemy(e, lane, gy, it);
     else if (e.type === 'star' && !e.friendly && Math.hypot(e.d - cx, gy + e.y - cy) < R) e.dead = true;
   }
   if (boss && boss.alive) {
@@ -1452,6 +1561,7 @@ function drawStick(x, gy, pose) {
 
 function drawEnemy(x, gy, o) {
   if (o.kind === 'brute') return drawBrute(x, gy, o);
+  if (o.kind === 'piranha') return drawPiranha(x, gy, o);
   const thrower = o.kind === 'thrower';
   ctx.save(); ctx.translate(2 * x, 0); ctx.scale(-1, 1);  // face the player
   // Thrower animation: settle, lean back to cock the arm, then lunge forward with an overhand whip.
@@ -1491,6 +1601,60 @@ function drawEnemy(x, gy, o) {
 }
 
 // Four-point throwing star. `tint` marks whose it is (red: enemy, accent: yours, white: pickup).
+// Drawn facing the runner (toward -x in lane space) unless it's swimming the other way; `x, y` is its middle.
+function drawPiranha(x, y, o) {
+  ctx.save(); ctx.translate(x, y);
+  if (o.face > 0) ctx.scale(-1, 1);
+  if (o.air) ctx.rotate(Math.max(-0.9, Math.min(0.9, o.vy / 900)) * (o.face > 0 ? -1 : 1));  // nose up leaping, down falling
+  const wag = Math.sin(o.t * (o.air ? 30 : 14)) * 0.35;
+  ctx.fillStyle = INK;
+  ctx.save(); ctx.translate(12, 0); ctx.rotate(wag);  // tail
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(12, -9); ctx.lineTo(9, 0); ctx.lineTo(12, 9); ctx.closePath(); ctx.fill();
+  ctx.restore();
+  ctx.beginPath(); ctx.ellipse(0, 0, 15, 9.5, 0, 0, Math.PI * 2); ctx.fill();                      // body
+  ctx.beginPath(); ctx.moveTo(-4, -8); ctx.lineTo(4, -15); ctx.lineTo(8, -7); ctx.closePath(); ctx.fill();  // fin
+  ctx.fillStyle = '#c8283a'; ctx.beginPath(); ctx.ellipse(-2, 4.5, 10, 3.8, 0, 0, Math.PI * 2); ctx.fill();  // red belly
+  ctx.fillStyle = '#ffffff'; ctx.beginPath();                                                           // teeth
+  for (let i = 0; i < 3; i++) { const tx = -15 + i * 3; ctx.moveTo(tx, 1); ctx.lineTo(tx + 1.5, 4); ctx.lineTo(tx + 3, 1); }
+  ctx.fill();
+  ctx.fillStyle = '#ff3b3b'; ctx.beginPath(); ctx.arc(-8, -3, 2.3, 0, Math.PI * 2); ctx.fill();         // eye
+  ctx.restore();
+}
+// The outline of a pond's basin, from bank to bank along its bed.
+function pondPath(o, gy) {
+  const x0 = o.d - o.len / 2;
+  ctx.beginPath(); ctx.moveTo(x0, gy);
+  for (let u = 6; u < o.len; u += 6) ctx.lineTo(x0 + u, gy + pondDepth(o, x0 + u));
+  ctx.lineTo(x0 + o.len, gy); ctx.closePath();
+}
+// The water goes on over everything in the pond (runners, enemies, piranhas), so whatever's under
+// the surface looks submerged: a see-through layer, a gently swelling waterline, glints, and ripples.
+function drawWater(lane, gy, sky, half) {
+  for (const o of lane.obs) {
+    if (o.type !== 'pond' || o.dead || o.d - o.len / 2 > half + 20 || o.d + o.len / 2 < -20) continue;
+    const x0 = o.d - o.len / 2, x1 = x0 + o.len;
+    ctx.save();
+    pondPath(o, gy); ctx.fillStyle = sky.waterTop; ctx.fill();
+    ctx.strokeStyle = 'rgba(225,245,255,0.8)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (let x = x0 + 3; x <= x1 - 3; x += 6) { const y = gy + 1 + Math.sin(x * 0.06 + time * 3) * 1.2; x === x0 + 3 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    for (let i = 0; i < Math.floor(o.len / 90); i++) {  // glints drifting just under the surface
+      const gx = x0 + 30 + ((i * 97 + time * 12) % (o.len - 60)), a = 0.5 + 0.5 * Math.sin(time * 2 + i * 2.1);
+      ctx.globalAlpha = a; seg(gx, gy + 6 + (i % 2) * 4, gx + 10, gy + 6 + (i % 2) * 4);
+    }
+    ctx.beginPath(); ctx.rect(x0, gy - 30, o.len, o.depth + 40); ctx.clip();
+    for (const r of lane.obs) {
+      if (r.type !== 'ripple' || r.t < 0 || r.d < x0 - 80 || r.d > x1 + 80) continue;
+      const k = r.t / r.life, rx = 6 + k * 46 * r.size;
+      ctx.globalAlpha = (1 - k) * 0.8; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2 * (1 - k) + 0.6;
+      ctx.beginPath(); ctx.ellipse(r.d, gy + 1, rx, rx * 0.16 + 1, 0, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
 function drawShuriken(x, y, rot, tint, glow = false, scale = 1, ink = INK) {
   ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(scale, scale);
   if (glow) { ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 12; }
@@ -1862,7 +2026,7 @@ function drawLane(lane, sky) {
   if (boss) drawLair(boss.gateD, boss.exitD, gy, half);
 
   // terrain first, so everything else is drawn on top of it
-  const terrain = o => o.type === 'tunnel' || o.type === 'ledge';
+  const terrain = o => o.type === 'tunnel' || o.type === 'ledge' || o.type === 'pond';
   for (const o of [...lane.obs.filter(terrain), ...lane.obs.filter(o => !terrain(o))]) {
     if (o.dead) continue;
     ctx.fillStyle = INK;
@@ -1881,6 +2045,8 @@ function drawLane(lane, sky) {
       ctx.fillStyle = sky.accent; ctx.fillRect(rx, gy, rw, 3);
       ctx.fillStyle = 'rgba(11,10,15,0.35)'; ctx.fillRect(rx + 8, gy + TUNNEL.roof, rw - 16, 6);
     }
+    else if (o.type === 'pond') { pondPath(o, gy); ctx.fillStyle = sky.water; ctx.fill(); }  // the water itself goes on later, over whoever's in it
+    else if (o.type === 'ripple') continue;
     else if (o.type === 'ledge') {
       ctx.fillRect(o.d - o.len / 2, gy - o.h, o.len, o.h + 1);
       ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.fillRect(o.d - o.len / 2, gy - o.h, o.len, 3);
@@ -2037,6 +2203,8 @@ function drawLane(lane, sky) {
     }
     ctx.shadowBlur = 0;
   }
+
+  drawWater(lane, gy, sky, half);
 
   for (const p of particles) {
     if (p.side && p.side !== lane.side) continue;
@@ -2475,8 +2643,8 @@ function drawTooltip(it, stack, price = 0) {
 }
 
 const SKIES = {
-  '-1': { top: '#2a1631', bot: '#ff8a4c', hill: 'rgba(40,18,40,0.55)', accent: '#ffb347', cave: '#5a2a35' },
-  '1':  { top: '#141a3a', bot: '#5fb4ff', hill: 'rgba(15,22,55,0.55)', accent: '#7fd8ff', cave: '#22345e' },
+  '-1': { top: '#2a1631', bot: '#ff8a4c', hill: 'rgba(40,18,40,0.55)', accent: '#ffb347', cave: '#5a2a35', water: '#1d4866', waterTop: 'rgba(150,200,230,0.26)' },
+  '1':  { top: '#141a3a', bot: '#5fb4ff', hill: 'rgba(15,22,55,0.55)', accent: '#7fd8ff', cave: '#22345e', water: '#102c55', waterTop: 'rgba(120,210,255,0.30)' },
 };
 
 function draw() {
@@ -2563,7 +2731,7 @@ function draw() {
     ctx.fillText('1 2 3  left hotbar    4 5 6  right hotbar    Esc  pause / inventory', W / 2, H * 0.55 + 32);
     ctx.fillText('Both runners copy your every move. Survive both worlds.', W / 2, H * 0.55 + 64);
     ctx.globalAlpha = 0.5;
-    ctx.fillText('Testing:  7 enemies   8 platform   9 throwers   0 boss   - club   = +1000 gold   B brutes   X axe   P skip boss   R restart', W / 2, H * 0.55 + 96);
+    ctx.fillText('Testing:  7 enemies   8 platform   9 throwers   0 boss   - club   = +1000 gold   B brutes   X axe   P skip boss   O pond (Shift+O shallow)   R restart', W / 2, H * 0.55 + 96);
     ctx.globalAlpha = 0.5 + 0.5 * Math.sin(performance.now() / 300);
     ctx.fillText(game.state === 'over' ? 'Space or click to retry' : 'Space or click to start', W / 2, H * 0.55 + 140);
     ctx.globalAlpha = 1;
