@@ -165,6 +165,7 @@ const DEBUG_KEYS = [
   { key: 'j', label: 'Give Rusted Helmet', stay: true, run: () => giveBoth('rustedHelmet') },
   { key: 'k', label: 'Spawn knife enemies', run: () => lanes.forEach(l => spawnObstacle(l, 'knifer')) },
   { key: 'l', label: 'Give Knife', stay: true, run: () => giveBoth('knife') },
+  { key: 'y', label: 'Give Ninja Gloves', stay: true, run: () => giveBoth('ninjaGloves') },
   { key: 'u', label: 'Checkpoint shop now', run: () => { if (!outpost && !boss) startOutpost(Math.round(game.nextCheckpoint / CHECKPOINT.every)); } },
 ];
 function debugBiome(kind) {
@@ -291,7 +292,8 @@ const PUNCH = { name: 'Fists', rarity: 'common', melee: true, anim: 'punch', att
 //   stack       how many fit in one slot (default 1)
 //   type        what the tooltip calls items that aren't weapons
 //   equip       gear: the equipment slot it's worn in ('head', 'chest', 'feet' or 'accessory')
-//   stats       what wearing it adds; every equipped piece's stats are summed (see gearStat)
+//   stats       what wearing it adds; every equipped piece's stats are summed (see gearStat and
+//               STAT_TEXT for the ones that exist)
 //   worn        how it's drawn on a body that wears it (a WORN entry), so runners and enemies show it
 //   value       base sell price in gold for one of it, before the rarity multiplier (see sellValue).
 //               Shop items skip this and sell back for SELL.shopCut of their shop price instead.
@@ -321,6 +323,9 @@ const ITEMS = {
   // armor
   rustedHelmet: { name: 'Rusted Helmet', rarity: 'common', value: 1.5, type: 'Helmet', equip: 'head', stats: { defense: 3 }, worn: 'rustedHelmet',
                   desc: 'Have you ever used 1-ply toilet paper and thought, \'wow, this is really easy to break\' yeah, well that\'s this item, but in armor form. How stylish.' },
+  // accessories
+  ninjaGloves: { name: 'Ninja Gloves', rarity: 'rare', value: 2, type: 'Accessory', equip: 'accessory', stats: { throwDamage: 0.05, keepThrown: 0.1 }, worn: 'ninjaGloves',
+                 desc: 'Fits like a glove.' },
   // Placeholders, so the inventory has something in it. Weapons swing with the punch animation for now.
   dagger: { name: 'Rusty Dagger', rarity: 'common', value: 1, melee: true, anim: 'punch', attackSpeed: 'fast', min: 8, max: 11,
             critChance: 0.35, critMult: 2, range: 75, swing: { dur: 0.16, hit: [0.1, 0.9] }, desc: 'Placeholder tooltip.' },
@@ -367,6 +372,7 @@ const PICKUP = { carry: 0.5, magnet: [35, 65], pull: 14 };
 const DAMAGE = { cspike: 20, brute: 25, axe: 35, enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45, piranha: 20, knifer: 30 };
 const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5, waterDrag: 0.35 };  // thrown at chest height; waterDrag = speed kept underwater
 const SHURIKEN_DROP_WEIGHTS = [0, 0, 4, 8, 12, 14, 14, 13, 11, 9, 7, 5, 3];  // index = how many a thrower drops (2-12, usually 4-8)
+const NINJA_GLOVES_DROP = 0.04;  // chance a ninja (thrower) drops Ninja Gloves
 const NINJA_CHANCE = 0.25;  // chance a plain enemy spawns as a thrower instead (about 2.5 walkers per ninja overall)
 // Knife guys: walkers that hit harder and, instead of just walking into you, stab from a short way off.
 // Once you're about to be in reach they raise the knife overhead, then bring it down in a stab that
@@ -416,6 +422,14 @@ function gearStat(r, stat) {
   for (let i = EQUIP0; i < r.inv.length; i++) if (r.inv[i]) t += (ITEMS[r.inv[i].key].stats || {})[stat] || 0;
   return t;
 }
+// What each stat means, for tooltips. Stats that are fractions show as percents.
+const STAT_TEXT = {
+  defense: v => [`+${v} defense`, `Halves the first ${v} damage of every hit`],
+  throwDamage: v => [`+${Math.round(v * 100)}% throwable damage`, 'Shurikens and grenades'],
+  keepThrown: v => [`${Math.round(v * 100)}% chance not to use up a throwable`],
+};
+// A copy of a weapon with its damage scaled (for thrown items boosted by gear when they were thrown).
+const boosted = (it, mult) => (mult && mult !== 1 ? { ...it, min: it.min * mult, max: it.max * mult } : it);
 const wornKeys = r => r.inv.slice(EQUIP0).filter(s => s && ITEMS[s.key].worn).map(s => s.key);
 // Defense D halves the first D points of every hit: 10 damage through 3 defense is 10 - 1.5 = 8.5.
 const afterDefense = (dmg, def) => Math.round((dmg - 0.5 * Math.min(def, dmg)) * 10) / 10;
@@ -1004,12 +1018,16 @@ function update(dt) {
         continue;
       }
       if (it && it.throwSpeed) {
-        if (!--st.n) r.inv[r.slot] = null;
+        // gear like Ninja Gloves can save the throwable from being used up
+        if (Math.random() < gearStat(r, 'keepThrown'))
+          popups.push({ x: player.off, y: gy + r.y - 100, vx: 0, vy: -140, text: 'SAVED', word: true, side: lane.side, life: 0.7, age: 0 });
+        else if (!--st.n) r.inv[r.slot] = null;
         r.attack = st.key;
         r.aimA = Math.atan2(dx, dy);  // the throwing arm follows through along this
         const v = it.throwSpeed;
         lane.obs.push({ type: it.lob ? 'grenade' : 'star', item: st.key, friendly: true, d: hand.d, y: hand.y,
-                        vd: dx / len * v, vy: dy / len * v, t: 0, bounces: 0, dead: false, hit: false });
+                        vd: dx / len * v, vy: dy / len * v, t: 0, bounces: 0, dead: false, hit: false,
+                        boost: 1 + gearStat(r, 'throwDamage') });  // (set when thrown, so it carries across the mirror)
         burst(hand.d, gy + hand.y, 8, 0.5, lane.side);  // release flash
       } else if (it && it.beam) {
         r.attack = st.key;
@@ -1103,7 +1121,7 @@ function update(dt) {
       if (o.type === 'star') {
         if (o.friendly) {  // your stars (thrown or deflected) hit the first enemy in their path
           const e = lane.obs.find(e => e.type === 'enemy' && !e.dead && overlaps(b, obstacleBox(e, gy)));
-          if (e) { o.dead = true; hitEnemy(e, lane, gy, ITEMS.shuriken); }
+          if (e) { o.dead = true; hitEnemy(e, lane, gy, boosted(ITEMS.shuriken, o.boost)); }
           if ((o.d > W / 2 + 40 && !canCross(o)) || o.d < -40 || gy + o.y < -40 || gy + o.y > H + 40) o.dead = true;
           continue;
         }
@@ -1413,6 +1431,7 @@ function hitEnemy(o, lane, gy, weapon = PUNCH) {
     dropCoins(lane, o);
     if (lane.body.hp < MAX_HP && Math.random() < HEALTH_DROP.chance) dropHealth(lane, o, HEALTH_DROP.enemyHeal);
     if (o.kind === 'thrower') dropItems(lane, o, 'shuriken', rollWeighted(SHURIKEN_DROP_WEIGHTS));
+    if (o.kind === 'thrower' && Math.random() < NINJA_GLOVES_DROP) dropItems(lane, o, 'ninjaGloves', 1);
     for (const key of o.gear || []) if (Math.random() < ENEMY_GEAR[key].drop) dropItems(lane, o, key, 1);
     if (o.kind === 'knifer' && Math.random() < KNIFER.knifeDrop) dropItems(lane, o, 'knife', 1);
     if (brute) { dropCoins(lane, o); if (Math.random() < BRUTE.axeDrop) dropItems(lane, o, 'axe', 1); }
@@ -1554,15 +1573,16 @@ function updateGrenade(lane, o, dt, gy) {
 // Blast damage to everything in range, the boss included. Too close and it gets the thrower too.
 function explode(lane, o, gy) {
   const it = ITEMS[o.item], R = it.aoe, cx = o.d, cy = gy + o.y, r = lane.body;
+  const hit = boosted(it, o.boost);  // (the thrower's own blast damage stays unboosted)
   o.dead = true;
   for (const e of lane.obs) {
     if (e.dead) continue;
-    if (e.type === 'enemy' && Math.hypot(e.d - cx, gy + e.y - (e.kind === 'piranha' ? 0 : 36) - cy) < R + 14) hitEnemy(e, lane, gy, it);
+    if (e.type === 'enemy' && Math.hypot(e.d - cx, gy + e.y - (e.kind === 'piranha' ? 0 : 36) - cy) < R + 14) hitEnemy(e, lane, gy, hit);
     else if (e.type === 'star' && !e.friendly && Math.hypot(e.d - cx, gy + e.y - cy) < R) e.dead = true;
   }
   if (boss && boss.alive) {
     const b = bossBox(lane.side, gy);
-    if (cx > b.d0 - R && cx < b.d1 + R && cy > b.y0 - R && cy < b.y1 + R) hitBoss(lane, it, gy);
+    if (cx > b.d0 - R && cx < b.d1 + R && cy > b.y0 - R && cy < b.y1 + R) hitBoss(lane, hit, gy);
   }
   // the closer to the blast, the more it hurts (up to the grenade's full damage)
   const near = Math.hypot(player.off - cx, gy + r.y - 35 - cy);
@@ -2050,7 +2070,7 @@ function bossVsRunner(lane, r, pb, hitting, gy) {
   }
   for (const o of lane.obs) {
     if (o.type !== 'star' || !o.friendly || o.dead || !boss.alive) continue;
-    if (overlaps(obstacleBox(o, gy), bb)) { o.dead = true; hitBoss(lane, ITEMS.shuriken, gy); }
+    if (overlaps(obstacleBox(o, gy), bb)) { o.dead = true; hitBoss(lane, boosted(ITEMS.shuriken, o.boost), gy); }
   }
   for (const o of lane.obs) if (o.type === 'grenade' && !o.dead && boss.alive && overlaps(obstacleBox(o, gy), bb)) explode(lane, o, gy);
   // a swing only hurts in its marked zone, on the side it's aimed at
@@ -2199,7 +2219,26 @@ const WORN = {
     seg(7, -9, 9, -5); seg(9, -5, 8, -3);
     ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(9.5, -1.5, 1.2, 0, Math.PI * 2); ctx.fill();  // rivet
   } },
+  // drawn on each hand, with +y pointing out past the fingers (back up the forearm is -y)
+  ninjaGloves: { on: 'hands', draw: () => {
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.fillStyle = NINJA_CLOTH; ctx.strokeStyle = INK; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(0, 0.5, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();  // glove
+    ctx.strokeStyle = NINJA_WRAP; ctx.lineWidth = 2.5; seg(-3.8, -4.5, 3.8, -4.5);  // red wrist wrap
+  },
+  // inventory icon: a pair of mittens
+  icon: ink => {
+    for (const side of [-1, 1]) {
+      ctx.save(); ctx.translate(side * 8, 0); ctx.scale(side, 1); ctx.rotate(0.18);
+      ctx.fillStyle = NINJA_CLOTH; ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.ellipse(-6, 0, 3, 5.5, -0.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();  // thumb
+      ctx.beginPath(); ctx.roundRect(-6, -13, 12, 20, 6); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = NINJA_WRAP; ctx.beginPath(); ctx.roundRect(-6.5, 6, 13, 6, 2); ctx.fill(); ctx.stroke();  // wrist wrap
+      ctx.restore();
+    }
+  } },
 };
+const NINJA_CLOTH = '#2c3150', NINJA_WRAP = '#d6293e';
 
 function drawStick(x, gy, pose) {
   // `club` (or `grip`, for a gun) puts both hands on a held weapon: `reach` is where the arms point,
@@ -2258,7 +2297,8 @@ function drawStick(x, gy, pose) {
   }
   // the throwing hand drags a soft arc behind it, drawn behind the arm
   if (toss >= 0) fistTrail(k => fistAt(tossArm(k, aim), shX, shY), Math.max(0, toss - 0.35), Math.min(toss, 0.6), 0.5);
-  for (const [a1, a2] of arms) { const e = limb(shX, shY, a1, 14); const h = limb(e[0], e[1], a2, 14); hand = hand || h; }
+  const hands = [];  // each hand and its forearm angle, for gloves
+  for (const [a1, a2] of arms) { const e = limb(shX, shY, a1, 14); const h = limb(e[0], e[1], a2, 14); hands.push([h[0], h[1], a2]); hand = hand || h; }
   if (two) hand = [shX + Math.sin(two.reach) * reachLen, shY + Math.cos(two.reach) * reachLen, shX, shY];
   const headX = nx + Math.sin(Math.PI - torsoA) * 10, headY = ny + Math.cos(Math.PI - torsoA) * 10;
   ctx.beginPath(); ctx.arc(headX, headY, 10, 0, Math.PI * 2); ctx.fill();
@@ -2277,6 +2317,10 @@ function drawStick(x, gy, pose) {
       ctx.save(); ctx.strokeStyle = '#ffffff'; ctx.globalAlpha = (1 - t) * 0.45; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(f[0] + 4, f[1], 5 + t * 10, -1.1, 1.1); ctx.stroke(); ctx.restore();
     }
+  }
+  for (const key of pose.gear || []) {  // gloves go on last, over the fists
+    const w = WORN[ITEMS[key].worn];
+    if (w.on === 'hands') for (const [hx, hy, a] of hands) { ctx.save(); ctx.translate(hx, hy); ctx.rotate(-a); w.draw(); ctx.restore(); }
   }
   if (hand && !two) hand.push(shX, shY);
   return hand;  // where the front hand ended up (then the shoulder), for holding things
@@ -3173,6 +3217,9 @@ function drawItemIcon(key, x, y, s = 1, ink = '#f4efe6') {
   if (key === 'knife') { const a = -0.8; return drawKnife(x - Math.cos(a) * 9 * s, y - Math.sin(a) * 9 * s, a, 1.1 * s, ink); }
   if (key === 'axe') { const a = -0.8; return drawAxe(x - Math.cos(a) * 17 * s, y - Math.sin(a) * 17 * s, a, 0.58 * s, ink); }
   if (key === 'club') { const a = -0.8; return drawClub(x - Math.cos(a) * 17 * s, y - Math.sin(a) * 17 * s, a, 0.62 * s, ink); }
+  if (ITEMS[key] && ITEMS[key].worn && WORN[ITEMS[key].worn].icon) {  // gear with its own icon
+    ctx.save(); ctx.translate(x, y); ctx.scale(s, s); WORN[ITEMS[key].worn].icon(ink); ctx.restore(); return;
+  }
   if (ITEMS[key] && ITEMS[key].worn) {  // gear shows as it looks worn, blown up
     ctx.save(); ctx.translate(x, y + 9 * s); ctx.scale(1.55 * s, 1.55 * s); WORN[ITEMS[key].worn].draw(); ctx.restore(); return;
   }
@@ -3733,8 +3780,11 @@ function drawTooltip(it, stack, price = 0, extra = []) {
   if (it.equip) {
     const st = it.stats || {};
     rows.push(['', '6px']);
-    if (st.defense) rows.push([`+${st.defense} defense`, '700 15px', '#fff'],
-                              [`Halves the first ${st.defense} damage of every hit`, '600 13px', 'rgba(255,255,255,0.6)']);
+    for (const k in st) {
+      const [main, note] = STAT_TEXT[k](st[k]);
+      rows.push([main, '700 15px', '#fff']);
+      if (note) rows.push([note, '600 13px', 'rgba(255,255,255,0.6)']);
+    }
     rows.push([`Worn in the ${SLOT_NAMES[it.equip]} slot`, '600 13px', 'rgba(255,255,255,0.5)']);
   }
   if (it.heal) rows.push(['', '6px'], [`Restores ${it.heal} HP when used`, '600 15px', '#fff']);
