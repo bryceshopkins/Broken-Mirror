@@ -308,7 +308,7 @@ const MAX_HP = 100, INVULN_T = 1.2;  // s of invulnerability after a hit (each r
 const REGEN = { delay: 5, rate: 0.35 };  // s after a hit before it starts; HP per second
 const HEALTH_DROP = { chance: 0.08, enemyHeal: 10, bossHeal: 25, bossCount: 2 };
 const DAMAGE = { brute: 25, axe: 35, enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45, piranha: 20 };
-const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5 };  // thrown at chest height
+const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5, waterDrag: 0.35 };  // thrown at chest height; waterDrag = speed kept underwater
 const SHURIKEN_DROP_WEIGHTS = [25, 35, 25, 10, 5];  // index = how many a thrower drops (0-4)
 // Brutes show up once Gronk is down: slow and thick, swinging a huge axe in an overhead arc that
 // covers everything in front of them and above their head, so hopping over one gets you chopped.
@@ -775,12 +775,7 @@ function update(dt) {
         if (o.t * BOSS.waveSpeed > BOSS.waveRange) o.dead = true;
         continue;
       }
-      if (o.type === 'star') {  // stars fly freely: yours where you aimed, theirs toward you (a bit faster than the ground)
-        if (o.friendly) { o.d += o.vd * dt; o.y += o.vy * dt; }
-        else o.d -= (speed + STAR.enemySpeed) * dt;
-        o.t += dt;
-        continue;
-      }
+      if (o.type === 'star') { updateStar(lane, o, dt, gy); continue; }
       o.stun = Math.max(0, (o.stun || 0) - dt);
       // ground enemies walk toward you (but wait behind an overhead wall rather than walk into it);
       // platform guards and throwers hold their ground
@@ -1173,6 +1168,44 @@ function updateBolt(lane, o, dt, gy) {
     return;
   }
   if (x1 > W / 2 + 60 || x1 < -60 || y1 < -60 || y1 > H + 60) o.dead = true;
+}
+
+// Stars fly freely: yours where you aimed, theirs toward you (a bit faster than the ground). Like the
+// laser bolts, they fly through floating platforms and tunnel roofs but shatter on anything solid: a
+// block, ledge, spikes, an overhead wall or the ground. (Enemy stars sail past the other enemies; yours
+// hit them, see update.) Under a pond's surface they slow right down, as if the water's dragging on them.
+const STAR_STOPS = ['block', 'ledge', 'spike', 'bar'];
+function updateStar(lane, o, dt, gy) {
+  const wet = o.y > 0 && !!pondAt(lane, o.d);
+  if (wet !== !!o.wet) { spray(lane, o.d, gy, 8, 0.45, o.friendly ? 1 : -1); ripple(lane, o.d, 0.6); }  // in or out through the surface
+  o.wet = wet;
+  const k = wet ? STAR.waterDrag : 1, x0 = o.d, y0 = gy + o.y;
+  if (o.friendly) { o.d += o.vd * k * dt; o.y += o.vy * k * dt; }
+  else o.d -= (speed + STAR.enemySpeed * k) * dt;
+  o.t += dt;
+  if (wet && (o.wakeT = (o.wakeT || 0) - dt) <= 0) { o.wakeT = 0.12; burst(o.d, gy + o.y, 1, 0.15, lane.side, '#bfe6ff'); }  // bubbles
+  const x1 = o.d, y1 = gy + o.y;
+  let first = 1.01, hit = false;
+  for (const e of lane.obs) {
+    if (e.dead || !STAR_STOPS.includes(e.type)) continue;
+    const t = segEnter(x0, y0, x1, y1, obstacleBox(e, gy));
+    if (t >= 0 && t < first) { first = t; hit = true; }
+  }
+  for (let j = 1; j <= 4; j++) {  // the ground (a tunnel floor, a pond bed), at a few points along the way
+    const t = j / 4;
+    if (t >= first) break;
+    if (y0 + (y1 - y0) * t - gy >= floorAt(lane, x0 + (x1 - x0) * t)) { first = t; hit = true; break; }
+  }
+  if (hit) shatterStar(lane, o, x0 + (x1 - x0) * first, y0 + (y1 - y0) * first);
+}
+// A star breaking on something: a flash of sparks and a few bits flying off.
+function shatterStar(lane, o, x, y) {
+  const tint = o.deflected ? '#ffffff' : o.friendly ? null : '#ff3b3b';
+  o.dead = true;
+  burst(x, y, 7, 0.6, lane.side, '#ffffff');
+  burst(x, y, 6, 0.5, lane.side, tint);
+  const vx = o.friendly ? o.vd : -1, vy = o.friendly ? o.vy : 0;
+  lane.obs.push({ type: 'spark', d: x, y: y - groundY(), a: Math.atan2(vy, vx), glow: tint || '#ffffff', t: 0, dead: false, hit: false });
 }
 
 // Grenades fly in an arc and bounce off whatever floor is under them; the second bounce sets them off.
@@ -2241,7 +2274,7 @@ function drawLane(lane, sky) {
     }
     else if (o.type === 'spark') {  // impact flash: a bright star of short rays splashing back off the surface
       const k = o.t / 0.12, x = o.d, y = gy + o.y;
-      ctx.save(); ctx.globalAlpha = 1 - k; ctx.lineCap = 'round'; ctx.shadowColor = '#ff2b6a'; ctx.shadowBlur = 14;
+      ctx.save(); ctx.globalAlpha = 1 - k; ctx.lineCap = 'round'; ctx.shadowColor = o.glow || '#ff2b6a'; ctx.shadowBlur = 14;
       ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(x, y, 7 * (1 - k) + 2, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = '#ffd6e4'; ctx.lineWidth = 2;
       for (let i = 0; i < 6; i++) {
