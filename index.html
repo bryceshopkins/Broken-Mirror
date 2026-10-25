@@ -323,7 +323,8 @@ const REGEN = { delay: 5, rate: 0.35 };  // s after a hit before it starts; HP p
 const HEALTH_DROP = { chance: 0.08, enemyHeal: 10, bossHeal: 25, bossCount: 2 };
 const DAMAGE = { cspike: 20, brute: 25, axe: 35, enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45, piranha: 20 };
 const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5, waterDrag: 0.35 };  // thrown at chest height; waterDrag = speed kept underwater
-const SHURIKEN_DROP_WEIGHTS = [25, 35, 25, 10, 5];  // index = how many a thrower drops (0-4)
+const SHURIKEN_DROP_WEIGHTS = [0, 0, 4, 8, 12, 14, 14, 13, 11, 9, 7, 5, 3];  // index = how many a thrower drops (2-12, usually 4-8)
+const NINJA_CHANCE = 0.25;  // chance a plain enemy spawns as a thrower instead (about 2.5 walkers per ninja overall)
 // Brutes show up once Gronk is down: slow and thick, swinging a huge axe in an overhead arc that
 // covers everything in front of them and above their head, so hopping over one gets you chopped.
 // Slide under the swing. Every hit knocks them back about as far as the ground scrolls before
@@ -595,6 +596,7 @@ function spawnObstacle(lane, type, extra = 0, y = 0, placed = false) {
   if (type === 'pond') return spawnPond(lane, d);
   // nothing stands in the water but plain walkers wading through (coins can hang over it)
   if (!placed && type !== 'coin' && type !== 'enemy' && pondAt(lane, d)) return null;
+  if (type === 'enemy' && (placed || !pondAt(lane, d)) && Math.random() < NINJA_CHANCE) type = 'thrower';  // not in the water
   let kind = null;
   if (type === 'thrower' || type === 'brute') { kind = type; type = 'enemy'; }
   const isTerrain = type === 'ledge' || type === 'tunnel';
