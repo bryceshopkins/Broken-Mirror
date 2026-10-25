@@ -52,8 +52,8 @@ window.addEventListener('keydown', e => {
     if (k === '0' && !boss) startBoss();
     if (k === '-') lanes.forEach(l => { if (!l.body.inv.some(s => s && s.key === 'club') && addItem(l.body, 'club')) addLabel(l, 'club'); });
     if (k === 'b') lanes.forEach(l => spawnObstacle(l, 'brute'));
-    // O: a deep pond with piranhas just ahead of both runners (Shift+O: an ankle-deep one, to wade through)
-    if (k === 'o') lanes.forEach(l => spawnPond(l, player.off + 240, e.shiftKey ? 14 : 62, !e.shiftKey, true));
+    // O: a deep pond with a piranha just ahead of both runners (Shift+O: an ankle-deep puddle)
+    if (k === 'o') lanes.forEach(l => spawnPond(l, player.off + 240, e.shiftKey ? 9 : 62, !e.shiftKey, true));
     if (k === 'x') lanes.forEach(l => { if (!l.body.inv.some(s => s && s.key === 'axe') && addItem(l.body, 'axe')) addLabel(l, 'axe'); });
     if (k === 'p' && !game.bossDefeated) {  // skip straight to the post-Gronk run (brutes start showing up)
       if (boss) { boss = null; lanes.forEach(l => { l.obs = l.obs.filter(o => o.type === 'coin' || o.type === 'item' || o.type === 'health'); }); }
@@ -299,11 +299,15 @@ const LEDGE = { minLen: 400, maxLen: 950, minH: 42, maxH: 78 };
 // Lengths are along the lane; depth is how far below the floor the tunnel bottom is.
 const TUNNEL = { minLen: 520, maxLen: 860, depth: 120, gap: 120, roof: 12, stepW: 30, steps: 6 };
 const STEP_H = TUNNEL.depth / TUNNEL.steps;
-// Ponds: a rare dip in the ground full of water, anywhere from ankle-deep to nearly over your head.
-// You wade along the bottom (sloped banks in and out), throwing up splashes and ripples. Deep ones
-// can hide piranhas: frail, but they dart at your legs and leap at you if you try to jump over.
-const POND = { chance: 0.07, minLen: 240, maxLen: 420, minDepth: 10, maxDepth: 66, bank: 60 };
-const PIRANHA = { hp: 10, minDepth: 34, chance: 0.7, chase: 210, idle: 45, sight: 60, leap: 2.2, retreat: 0.7 };
+// Ponds: an occasional dip in the ground full of water. Half of them are ankle-deep puddles that are
+// just something to splash through; the rest are proper ponds, up to nearly over your head. You wade
+// along the bottom (sloped banks in and out), throwing up spray and ripples. Some deep ones hide a
+// piranha (rarely two, and three only in a big one): frail, but they dart at your legs.
+const POND = { chance: 0.12, puddle: 0.5, bank: 60,
+               puddleLen: [140, 280], puddleDepth: [6, 13], pondLen: [240, 420], pondDepth: [18, 66] };
+const PIRANHA = { hp: 10, minDepth: 34, chance: 0.35, two: 0.08, twoBig: 0.18, threeBig: 0.03,
+                  chase: 210, idle: 45, sight: 60, retreat: 0.7 };
+const between = ([a, b]) => a + Math.random() * (b - a);
 let wallet = 0;
 try { wallet = Number(localStorage.getItem('mirrorrun.wallet')) || 0; } catch (e) {}
 function saveWallet() { try { localStorage.setItem('mirrorrun.wallet', wallet); } catch (e) {} }
@@ -434,25 +438,26 @@ function settleOnto(lane, t) {
 // A pond starting at lane distance d0. Random depth and size unless given; deep enough and it may
 // get a few piranhas. `force` clears whatever terrain or clutter is in the way (the testing hotkey).
 function spawnPond(lane, d0, depth = null, fish = null, force = false) {
-  const len = POND.minLen + Math.random() * (POND.maxLen - POND.minLen);
+  if (depth === null) depth = between(Math.random() < POND.puddle ? POND.puddleDepth : POND.pondDepth);
+  const len = between(depth < 16 ? POND.puddleLen : POND.pondLen);
   if (force) {  // (but never pull the ground out from under the runner)
     for (const o of lane.obs) if (o.d + (o.len || 0) / 2 > d0 - 40 && o.d - (o.len || 0) / 2 < d0 + len + 40 && o.d - (o.len || 0) / 2 > player.off + 20 &&
                                  !['coin', 'item', 'health'].includes(o.type) && !(o.type === 'enemy' && o.walks)) o.dead = true;
     lane.obs = lane.obs.filter(o => !o.dead);
   }
   if (terrainOverlaps(lane, d0 - 40, d0 + len + 40)) return null;
-  if (depth === null) depth = POND.minDepth + Math.random() * (POND.maxDepth - POND.minDepth);
   const p = { type: 'pond', d: d0 + len / 2, len, depth, t: Math.random() * 6, y: 0, dead: false, hit: false };
   // clear static clutter that was already sitting where the water is
   for (const o of lane.obs) if (Math.abs(o.d - p.d) < len / 2 && !o.walks && o.type !== 'coin' && o.type !== 'item' && o.type !== 'health') o.dead = true;
   lane.obs.push(p);
   if (fish === null) fish = depth >= PIRANHA.minDepth && Math.random() < PIRANHA.chance;
   if (fish) {
-    const n = 1 + Math.floor(Math.random() * (depth > 50 ? 3 : 2));
+    const big = len > 340 && depth > 50, roll = Math.random();
+    const n = big && roll < PIRANHA.threeBig ? 3 : roll < (big ? PIRANHA.twoBig : PIRANHA.two) ? 2 : 1;
     for (let i = 0; i < n; i++) {
       const hu = (Math.random() - 0.5) * (len - 2 * Math.min(POND.bank, len * 0.3));  // home spot, from the middle
       lane.obs.push({ type: 'enemy', kind: 'piranha', pond: p, hu, d: p.d + hu, y: depth * (0.45 + Math.random() * 0.3),
-                      hp: PIRANHA.hp, face: -1, vy: 0, vd: 0, air: false, leapCd: 0.6 + Math.random(), retreat: 0,
+                      hp: PIRANHA.hp, face: -1, retreat: 0,
                       t: Math.random() * 6, dead: false, hit: false, walks: false });
     }
   }
@@ -786,7 +791,7 @@ function update(dt) {
   }
 
   particles.forEach(p => { p.vy += 1400 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; p.rot += (p.spin || 0) * dt; });
-  particles = particles.filter(p => p.life > 0 && !(p.color === SPRAY && p.vy > 0 && p.y > groundY() + 3));  // spray drops back into the water
+  particles = particles.filter(p => p.life > 0 && !(p.water && p.vy > 0 && p.y > groundY() + 3));  // spray drops back into the water
   shake *= Math.pow(0.002, dt);
 }
 
@@ -891,51 +896,49 @@ function updateThrower(lane, o, dt) {
 }
 
 // Water. Ripples are flat rings spreading out on a pond's surface (drawn with the water, see drawWater).
-const SPRAY = '#cfefff';
+// Spray is silhouette drops (dark, with some in the lane's glow color) that vanish back into the water.
 function ripple(lane, d, size = 1, delay = 0) {
   lane.obs.push({ type: 'ripple', d, size, t: -delay, life: 0.6 + size * 0.35, dead: false, hit: false });
 }
-function splash(lane, d, gy, power) {
-  burst(d, gy, Math.round(6 + 14 * power), 0.35 + 0.45 * power, lane.side, SPRAY);
-  burst(d, gy, Math.round(3 + 6 * power), 0.25 + 0.3 * power, lane.side, '#ffffff');
-  ripple(lane, d, 0.8 + power * 0.6); ripple(lane, d, 0.6 + power * 0.5, 0.18);
+// n drops thrown up off the surface at d; `back` tips them toward behind the runner (-1) or ahead (1).
+function spray(lane, d, gy, n, power, back = 0) {
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + (Math.random() - 0.5) * 1.4 + back * 0.6, s = (220 + Math.random() * 380) * power;
+    particles.push({ x: d + (Math.random() - 0.5) * 12, y: gy, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.4 + Math.random() * 0.45,
+                     side: lane.side, r: 2.5 + Math.random() * 3.5, rot: 0, color: Math.random() < 0.6 ? INK : null, water: true });
+  }
 }
-// A runner in a pond: a splash going in or coming out through the surface, and while wading a steady
-// spray kicked up at the waterline with ripples trailing behind (more the deeper it is; sliding sprays the most).
+function splash(lane, d, gy, power) {
+  spray(lane, d, gy, Math.round(14 + 22 * power), 0.55 + 0.5 * power, -1);
+  spray(lane, d, gy, Math.round(10 + 16 * power), 0.55 + 0.5 * power, 1);
+  ripple(lane, d, 0.9 + power * 0.7); ripple(lane, d, 0.7 + power * 0.6, 0.15); ripple(lane, d, 0.5 + power * 0.5, 0.3);
+}
+// A runner in a pond: a big splash going in or coming out through the surface, and while wading spray
+// kicked up with every stride and ripples trailing behind (more the deeper it is; sliding sprays the most).
 function wade(lane, r, prevY, prevVy, gy, dt) {
   if (!pondAt(lane, player.off)) return;
-  if (prevY < 0 && r.y >= 0) splash(lane, player.off, gy, Math.min(1.5, 0.3 + Math.max(prevVy, 0) / 900));
-  else if (prevY >= 0 && r.y < 0) splash(lane, player.off, gy, 0.5);
+  if (prevY < 0 && r.y >= 0) splash(lane, player.off, gy, Math.min(1.6, 0.5 + Math.max(prevVy, 0) / 800));
+  else if (prevY >= 0 && r.y < 0) splash(lane, player.off, gy, 0.6);
   if (r.y <= 1) return;
   r.wadeT = (r.wadeT || 0) - dt;
   if (r.wadeT > 0) return;
   const deep = Math.min(1, r.y / 60);
-  r.wadeT = r.sliding ? 0.05 : 0.1 - deep * 0.03;
-  burst(player.off + 4, gy, r.sliding ? 5 : 2 + Math.round(deep * 3), 0.25 + deep * 0.3 + (r.sliding ? 0.25 : 0), lane.side, SPRAY);
-  ripple(lane, player.off, 0.5 + deep * 0.7);
+  r.wadeT = r.sliding ? 0.04 : 0.07;
+  spray(lane, player.off + 6, gy, (r.sliding ? 10 : 7) + Math.round(deep * 6), 0.75 + deep * 0.3 + (r.sliding ? 0.3 : 0), r.sliding ? 1 : -0.7);
+  ripple(lane, player.off, 0.6 + deep * 0.7);
 }
-// Piranhas circle their spot in the pond until a runner comes near, then dart at the legs. Jump over
-// the pond and they leap out after you. After a bite they back off for a moment, then come again.
+// Piranhas circle their spot in the pond until a runner comes near, then dart at the legs.
+// After a bite they back off for a moment, then come again. They never leave the water.
 function updatePiranha(lane, o, dt, gy) {
   const p = o.pond, r = lane.body;
   if (p.dead) { o.dead = true; return; }
-  o.leapCd -= dt; o.retreat -= dt;
-  if (o.air) {  // out of the water: thrown through the air, then a splash back in
-    o.vy += 1400 * dt; o.y += o.vy * dt; o.d += o.vd * dt;
-    if (o.vy > 0 && o.y > 6) { o.air = false; o.vy = 0; splash(lane, o.d, gy, 0.45); }
-    return;
-  }
+  o.retreat -= dt;
   const b = Math.min(POND.bank, p.len * 0.3), x0 = p.d - p.len / 2 + b * 0.6, x1 = p.d + p.len / 2 - b * 0.6;
   const near = player.off > x0 - PIRANHA.sight && player.off < x1 + PIRANHA.sight;
   let tx = p.d + o.hu + Math.sin(o.t * 0.9) * 35, ty = p.depth * 0.55 + Math.sin(o.t * 1.7) * 6, v = PIRANHA.idle;
   if (o.retreat > 0) { tx = o.d + 80; ty = p.depth; v = PIRANHA.chase; }
   else if (near && r.y > -10) { tx = player.off + o.hu * 0.12; ty = r.y - 14 + o.hu * 0.05; v = PIRANHA.chase; }  // in the water: go for the legs
-  else if (near && r.y > -190 && Math.abs(player.off - o.d) < 80 && o.leapCd <= 0) {  // jumping over: leap out after them
-    o.air = true; o.leapCd = PIRANHA.leap + Math.random();
-    o.vy = -Math.sqrt(2 * 1400 * Math.min(210, o.y - r.y + 40)); o.vd = (player.off - o.d) * 1.2;
-    splash(lane, o.d, gy, 0.5);
-    return;
-  } else if (near) { tx = player.off; ty = 10; v = PIRANHA.chase * 0.7; }  // lurk just under the surface below them
+  else if (near) { tx = player.off; ty = 10; v = PIRANHA.chase * 0.5; }  // jumping over: follow along just under the surface
   const dx = tx - o.d, dy = ty - o.y, len = Math.hypot(dx, dy);
   if (len > 1) { const s = Math.min(len, v * dt); o.d += dx / len * s; o.y += dy / len * s; }
   if (Math.abs(dx) > 2) o.face = Math.sign(dx);
@@ -1605,8 +1608,7 @@ function drawEnemy(x, gy, o) {
 function drawPiranha(x, y, o) {
   ctx.save(); ctx.translate(x, y);
   if (o.face > 0) ctx.scale(-1, 1);
-  if (o.air) ctx.rotate(Math.max(-0.9, Math.min(0.9, o.vy / 900)) * (o.face > 0 ? -1 : 1));  // nose up leaping, down falling
-  const wag = Math.sin(o.t * (o.air ? 30 : 14)) * 0.35;
+  const wag = Math.sin(o.t * 14) * 0.35;
   ctx.fillStyle = INK;
   ctx.save(); ctx.translate(12, 0); ctx.rotate(wag);  // tail
   ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(12, -9); ctx.lineTo(9, 0); ctx.lineTo(12, 9); ctx.closePath(); ctx.fill();
@@ -1627,28 +1629,31 @@ function pondPath(o, gy) {
   for (let u = 6; u < o.len; u += 6) ctx.lineTo(x0 + u, gy + pondDepth(o, x0 + u));
   ctx.lineTo(x0 + o.len, gy); ctx.closePath();
 }
-// The water goes on over everything in the pond (runners, enemies, piranhas), so whatever's under
-// the surface looks submerged: a see-through layer, a gently swelling waterline, glints, and ripples.
+// The water goes on over everything in the pond (runners, enemies, piranhas), so whatever's under the
+// surface looks submerged. Kept in the silhouette style: dark water lit from the top in the lane's glow
+// color, a glowing waterline that gently swells, a few glints, and ripples in the same glow.
 function drawWater(lane, gy, sky, half) {
   for (const o of lane.obs) {
     if (o.type !== 'pond' || o.dead || o.d - o.len / 2 > half + 20 || o.d + o.len / 2 < -20) continue;
     const x0 = o.d - o.len / 2, x1 = x0 + o.len;
     ctx.save();
-    pondPath(o, gy); ctx.fillStyle = sky.waterTop; ctx.fill();
-    ctx.strokeStyle = 'rgba(225,245,255,0.8)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    const g = ctx.createLinearGradient(0, gy, 0, gy + Math.max(o.depth, 12));
+    g.addColorStop(0, `rgba(${sky.glow},0.34)`); g.addColorStop(1, `rgba(${sky.glow},0.05)`);
+    pondPath(o, gy); ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = sky.accent; ctx.lineWidth = 2.5; ctx.lineCap = 'round'; ctx.shadowColor = sky.accent; ctx.shadowBlur = 10;
     ctx.beginPath();
     for (let x = x0 + 3; x <= x1 - 3; x += 6) { const y = gy + 1 + Math.sin(x * 0.06 + time * 3) * 1.2; x === x0 + 3 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
     ctx.stroke();
-    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-    for (let i = 0; i < Math.floor(o.len / 90); i++) {  // glints drifting just under the surface
-      const gx = x0 + 30 + ((i * 97 + time * 12) % (o.len - 60)), a = 0.5 + 0.5 * Math.sin(time * 2 + i * 2.1);
-      ctx.globalAlpha = a; seg(gx, gy + 6 + (i % 2) * 4, gx + 10, gy + 6 + (i % 2) * 4);
+    ctx.shadowBlur = 0; ctx.lineWidth = 2;
+    if (o.depth > 16) for (let i = 0; i < Math.floor(o.len / 90); i++) {  // glints drifting just under the surface
+      const gx = x0 + 40 + ((i * 97 + time * 12) % (o.len - 80));
+      ctx.globalAlpha = 0.25 + 0.25 * Math.sin(time * 2 + i * 2.1); seg(gx, gy + 7 + (i % 2) * 4, gx + 10, gy + 7 + (i % 2) * 4);
     }
     ctx.beginPath(); ctx.rect(x0, gy - 30, o.len, o.depth + 40); ctx.clip();
     for (const r of lane.obs) {
       if (r.type !== 'ripple' || r.t < 0 || r.d < x0 - 80 || r.d > x1 + 80) continue;
-      const k = r.t / r.life, rx = 6 + k * 46 * r.size;
-      ctx.globalAlpha = (1 - k) * 0.8; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2 * (1 - k) + 0.6;
+      const k = r.t / r.life, rx = 6 + k * 50 * r.size;
+      ctx.globalAlpha = (1 - k) * 0.9; ctx.lineWidth = 2.5 * (1 - k) + 0.8;
       ctx.beginPath(); ctx.ellipse(r.d, gy + 1, rx, rx * 0.16 + 1, 0, 0, Math.PI * 2); ctx.stroke();
     }
     ctx.restore();
@@ -2643,8 +2648,8 @@ function drawTooltip(it, stack, price = 0) {
 }
 
 const SKIES = {
-  '-1': { top: '#2a1631', bot: '#ff8a4c', hill: 'rgba(40,18,40,0.55)', accent: '#ffb347', cave: '#5a2a35', water: '#1d4866', waterTop: 'rgba(150,200,230,0.26)' },
-  '1':  { top: '#141a3a', bot: '#5fb4ff', hill: 'rgba(15,22,55,0.55)', accent: '#7fd8ff', cave: '#22345e', water: '#102c55', waterTop: 'rgba(120,210,255,0.30)' },
+  '-1': { top: '#2a1631', bot: '#ff8a4c', hill: 'rgba(40,18,40,0.55)', accent: '#ffb347', cave: '#5a2a35', water: '#26141f', glow: '255,179,71' },
+  '1':  { top: '#141a3a', bot: '#5fb4ff', hill: 'rgba(15,22,55,0.55)', accent: '#7fd8ff', cave: '#22345e', water: '#0f1733', glow: '127,216,255' },
 };
 
 function draw() {
