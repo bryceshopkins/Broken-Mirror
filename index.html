@@ -43,10 +43,15 @@ window.addEventListener('keydown', e => {
     return;
   }
   // Escape freezes the run and opens the inventory; while it's open, nothing else reaches the game
-  if (k === 'escape') { if (game.state === 'play') setPaused(!game.paused); return; }
+  if (k === 'escape') { if (game.state === 'play' && menu.mode !== 'shop') setPaused(!game.paused); return; }
   if (!keys[k] && runDebugKey(k, e.shiftKey, false)) { keys[k] = true; return; }
   if (game.paused) {
-    if (k === 'tab') { e.preventDefault(); if (!e.repeat) setShopOpen(!menu.shopOpen); }
+    // in a checkpoint shop: Tab flips through the tabs, Space or Enter heads back out
+    if (menu.mode === 'shop' && !e.repeat) {
+      if (k === 'tab') { const i = SHOP_TABS.findIndex(t => t.id === menu.tab); setTab(SHOP_TABS[(i + (e.shiftKey ? SHOP_TABS.length - 1 : 1)) % SHOP_TABS.length].id); }
+      if (k === ' ' || k === 'enter') setPaused(false);
+    }
+    if (k === 'tab' || k === ' ') e.preventDefault();
     keys[k] = true; return;
   }
   if ((k === 'w' || k === ' ') && !keys[k]) jumpPressed = true;
@@ -66,13 +71,14 @@ canvas.addEventListener('mousemove', e => {
   // in the inventory, pressing on an item and moving a few px picks it up
   const d = menu.down;
   if (d && !menu.drag && stackAt(d) && Math.hypot(mouse.x - d.x, mouse.y - d.y) > 5) menu.drag = d;
-  canvas.style.cursor = game.paused ? (menu.drag ? 'grabbing' : menuRefAt(mouse.x, mouse.y) || shopButtonAt(mouse.x, mouse.y) || shopToggleAt(mouse.x, mouse.y) ? 'pointer' : 'default')
+  canvas.style.cursor = game.paused ? (menu.drag ? 'grabbing' : menuRefAt(mouse.x, mouse.y) || shopButtonAt(mouse.x, mouse.y) || shopScreenButtonAt(mouse.x, mouse.y) ? 'pointer' : 'default')
                       : game.state === 'play' && hotbarAt(mouse.x, mouse.y) ? 'pointer' : '';
 });
 canvas.addEventListener('mousedown', e => {
   mouse.x = e.clientX; mouse.y = e.clientY;
   if (game.paused) {
-    if (shopToggleAt(mouse.x, mouse.y)) { setShopOpen(!menu.shopOpen); return; }
+    const btn = shopScreenButtonAt(mouse.x, mouse.y);  // a tab, Leave, or a checkpoint to travel to
+    if (btn) { btn.run(); return; }
     const sb = shopButtonAt(mouse.x, mouse.y);
     if (sb) { buy(sb.row, sb.side); return; }
     const s = menuRefAt(mouse.x, mouse.y);
@@ -103,6 +109,8 @@ window.addEventListener('mouseup', () => {
 function setPaused(on) {
   game.paused = on; menu.down = menu.drag = null; mouse.held = false;
   menu.trash = menu.sold = null;  // closing the inventory makes the trash and the last sale final
+  if (!on && menu.mode === 'shop' && outpost) { outpost.state = 'exit'; outpost.t = 0; }  // leaving a checkpoint shop
+  if (!on) { menu.mode = 'pause'; setTab('shop'); }
   jumpPressed = punchPressed = false;
   canvas.style.cursor = on ? 'default' : '';
 }
@@ -156,6 +164,7 @@ const DEBUG_KEYS = [
   { key: 'j', label: 'Give Rusted Helmet', stay: true, run: () => giveBoth('rustedHelmet') },
   { key: 'k', label: 'Spawn knife enemies', run: () => lanes.forEach(l => spawnObstacle(l, 'knifer')) },
   { key: 'l', label: 'Give Knife', stay: true, run: () => giveBoth('knife') },
+  { key: 'u', label: 'Checkpoint shop now', run: () => { if (!outpost && !boss) startOutpost(Math.round(game.nextCheckpoint / CHECKPOINT.every)); } },
 ];
 function debugBiome(kind) {
   if (boss) return debugNote('NOT DURING GRONK');
@@ -249,7 +258,8 @@ function setDebugOpen(on) {
 const game = { state: 'title', best: 0, paused: false };
 // inventory screen: the slot pressed on, the one being dragged, whether the shop is open, and what's
 // sitting in the trash / sell slot ({ side, stack }, plus `paid` for a sale) until something replaces it
-const menu = { down: null, drag: null, shopOpen: false, trash: null, sold: null };
+// `mode` is 'pause' (Esc: just the inventories) or 'shop' (a checkpoint shop, with its tabs).
+const menu = { down: null, drag: null, mode: 'pause', tab: 'shop', shopOpen: false, trash: null, sold: null };
 let player, lanes, particles, popups, labels, impact, shake, distance, speed, nextBeat, nextPlatform, time;
 
 // Tuning — kept slow for now while players learn the mirrored controls.
@@ -479,7 +489,9 @@ function startGame() {
   shake = 0; distance = 0; speed = BASE_SPEED; nextBeat = 400; nextPlatform = 1100; time = 0;
   boss = null; game.bossDefeated = false; game.bossCheck = BOSS.checkEvery; game.fadeIn = 0;
   game.biome = null; game.nextBiome = between(BIOME.first);
+  outpost = null; game.checkpoint = 0; game.nextCheckpoint = CHECKPOINT.every;
   game.state = 'play'; setPaused(false);
+  openOutpost(0);  // every run starts at checkpoint 0's shop
 }
 
 function makeHills() {
@@ -599,7 +611,7 @@ function roofOver(d0, d1, side) {
 // A new biome somewhere ahead: past everything already on the course (so no ledge or hole ends up
 // inside it), or, from the debug menu, coming in right in front of the runners.
 function startBiome(kind, now = false) {
-  if (boss) return false;
+  if (boss || outpost) return false;
   let ahead = W / 2 + 150;
   if (now) {
     ahead = W / 2 - 160;
@@ -616,7 +628,7 @@ function startBiome(kind, now = false) {
 function updateBiome() {
   const b = game.biome;
   if (b && b.end < distance - 60) { game.biome = null; game.nextBiome = distance + between(BIOME.gap); }
-  if (!game.biome && !boss && distance >= game.nextBiome) startBiome(Math.random() < 0.5 ? 'tunnel' : 'cave');
+  if (!game.biome && !boss && !outpost && distance >= game.nextBiome) startBiome(Math.random() < 0.5 ? 'tunnel' : 'cave');
 }
 // Spikes hanging off a fully-formed ceiling, kept clear of anything on the floor you'd need to jump.
 function spawnCeilingSpike(lane, extra) {
@@ -906,10 +918,11 @@ function update(dt) {
   }
   // In a boss arena the world stops scrolling; the runners move around on their own.
   // On the way in it brakes, so the runners come to a stop just inside his lair.
-  speed = boss ? (boss.state === 'approach' || boss.state === 'exit' ? boss.v : 0) : Math.min(MAX_SPEED, BASE_SPEED + distance / SPEED_RAMP);
+  speed = boss ? (boss.state === 'approach' || boss.state === 'exit' ? boss.v : 0) : outpost ? outpost.v : runSpeed();
   distance += speed * dt;
   if (boss) updateBoss(dt, gy);
-  else maybeStartBoss(dt);
+  else if (outpost) updateOutpost(dt, gy);
+  else { maybeStartBoss(dt); maybeStartOutpost(); }
   updateBiome();
   if (debug.bossLow && boss && boss.alive) { debug.bossLow = false; boss.hp = Math.min(boss.hp, 25); }
   // During the boss intro and death everything but attacking is frozen.
@@ -917,11 +930,14 @@ function update(dt) {
   if (frozen) jumpPressed = false;
 
   // Movement: A/D move both runners back/forward along their lanes (mirrored).
-  const move = frozen ? 0 : (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
-  player.moving = move !== 0;
+  const walking = strolling();
+  if (outpost && outpost.state === 'stroll') jumpPressed = punchPressed = false;
+  const move = frozen || walking ? 0 : (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
+  player.moving = move !== 0 || (walking && outpost.state === 'stroll');
   // ease into a slight lean: forward when pushing ahead, back when braking
   player.tilt += ((move > 0 ? 0.20 : move < 0 ? -0.20 : 0) - player.tilt) * Math.min(1, dt * 7);
-  if (boss && boss.state !== 'approach' && boss.state !== 'exit') {
+  if (walking) {}  // (the shop walks them in; see updateOutpost)
+  else if (boss && boss.state !== 'approach' && boss.state !== 'exit') {
     // in the arena you can walk right up to the boss, but not through him
     const limit = boss.state === 'intro' || !boss.alive ? W / 2 - 40 : Math.min(boss.x, W - boss.x) - 48;
     player.off = Math.max(40, Math.min(limit, player.off + move * 220 * dt));
@@ -1127,7 +1143,7 @@ function update(dt) {
   }
   jumpPressed = punchPressed = false;
 
-  if (!boss) {
+  if (!boss && !outpost) {
     nextBeat -= speed * dt;
     if (nextBeat <= 0) { spawnBeat(); nextBeat = 560 + Math.random() * 300 + speed * 0.5; }
     nextPlatform -= speed * dt;
@@ -1542,6 +1558,178 @@ function maybeStartBoss(dt) {
   if (game.bossCheck > 0) return;
   game.bossCheck = BOSS.checkEvery;
   if (Math.random() < BOSS.chance) startBoss();
+}
+
+// ---------- Checkpoint shops ----------
+// Every CHECKPOINT.every of distance (and at the very start of a run) the runners reach a shop that
+// straddles the mirror seam the way Gronk does, so each runner walks up to its own half. New obstacles
+// stop, the shop slides into view, the world brakes as it reaches the seam (pulling the runners
+// forward), and they stroll the last bit to their door. Inside is the shop screen: buying and selling,
+// their inventories, travel to any checkpoint reached before, and (later) special offers.
+const CHECKPOINT = {
+  every: 10000,       // px between checkpoints (1000 m)
+  halfW: 230,         // half the building's width; it's centered on the seam
+  doorAt: 0.5,        // how far out from the seam each door is (fraction of halfW)
+  brake: 300,         // px of braking on the way in
+  stroll: 110,        // px the runners walk on their own at the end
+  walk: 115,          // their strolling speed (px/s)
+  walkOut: 1.6,       // s to go from standing to full running speed on the way out
+};
+// Each checkpoint's shop looks different (they take turns). `img` is optional: the path of a PNG to draw
+// instead of the built-in building, e.g. 'shops/lantern.png'. It's drawn as one picture across both
+// halves of the screen, centered on the seam, bottom edge on the ground and halfW * 2 px wide.
+const SHOP_STYLES = [
+  { name: 'The Rusty Lantern', kind: 'cabin', wall: '#5b3a29', roof: '#8c2f2f', trim: '#e3b35c', glow: '#ffcf7a', accent: '#ffb347' },
+  { name: 'Pawn & Pebble', kind: 'stone', wall: '#4a4f5e', roof: '#2b2f3d', trim: '#a9c1d6', glow: '#bfe8ff', accent: '#7fd8ff' },
+  { name: 'Midnight Bazaar', kind: 'tent', wall: '#3b2452', roof: '#c2477a', trim: '#ffd23f', glow: '#ff9fd6', accent: '#ff7ac6' },
+];
+const shopStyle = k => SHOP_STYLES[k % SHOP_STYLES.length];
+let outpost = null;  // the checkpoint shop on the course: { k, state, t, d (lane distance of its center), v }
+let bestCheckpoint = 0;
+try { bestCheckpoint = Number(localStorage.getItem('mirrorrun.checkpoint')) || 0; } catch (e) {}
+function reachCheckpoint(k) {
+  game.checkpoint = k; game.nextCheckpoint = (k + 1) * CHECKPOINT.every;
+  if (k > bestCheckpoint) { bestCheckpoint = k; try { localStorage.setItem('mirrorrun.checkpoint', k); } catch (e) {} }
+}
+const doorD = () => W / 2 - CHECKPOINT.halfW * CHECKPOINT.doorAt;
+const runSpeed = () => Math.min(MAX_SPEED, BASE_SPEED + distance / SPEED_RAMP);
+// A shop somewhere ahead: past everything already on the course, so nothing's left in the way.
+function startOutpost(k) {
+  let d = W / 2 + CHECKPOINT.halfW + 150;
+  for (const lane of lanes) for (const o of lane.obs) d = Math.max(d, o.d + (o.len || 0) / 2 + CHECKPOINT.halfW + 150);
+  if (game.biome && game.biome.start - distance > W / 2) game.biome = null;  // (only the debug key starts one near a biome)
+  if (game.biome) d = Math.max(d, game.biome.end - distance + CHECKPOINT.halfW + 150);
+  outpost = { k, state: 'approach', t: 0, d, v: speed, v0: speed, off0: null };
+}
+// Called every frame outside a shop: one is due every CHECKPOINT.every, but waits for Gronk or a tunnel/cave to be over.
+function maybeStartOutpost() {
+  if (!outpost && !boss && !game.biome && distance >= game.nextCheckpoint) startOutpost(Math.round(game.nextCheckpoint / CHECKPOINT.every));
+}
+// Standing at a shop's door with the shop screen open (the start of a run, or after travelling).
+function openOutpost(k) {
+  outpost = { k, state: 'open', t: 0, d: W / 2, v: 0, v0: 0, off0: 0 };
+  player.off = doorD();
+  reachCheckpoint(k);
+  openShopScreen();
+}
+function openShopScreen() {
+  setPaused(true);
+  menu.mode = 'shop'; setTab('shop');
+}
+// Travelling to a checkpoint reached before: same runners, same inventories, a fresh course from there.
+// (Gronk only shows up before the first checkpoint, so travelling past it skips him.)
+function travelTo(k) {
+  menu.trash = menu.sold = null;
+  distance = k * CHECKPOINT.every;
+  for (const lane of lanes) lane.obs = [];
+  particles = []; popups = []; labels = [];
+  boss = null; if (k > 0) game.bossDefeated = true;
+  game.biome = null; game.nextBiome = distance + between(BIOME.first);
+  nextBeat = 300; nextPlatform = 800;
+  openOutpost(k);
+  shopNote(`Welcome to ${shopStyle(k).name}`, shopStyle(k).accent);
+}
+function updateOutpost(dt, gy) {
+  const o = outpost;
+  o.t += dt;
+  if (o.state === 'approach') {
+    o.d -= speed * dt;
+    const left = o.d - W / 2;
+    if (left > CHECKPOINT.brake) { o.v = o.v0 = runSpeed(); return; }
+    // braking: the world slows to a stop as the shop reaches the seam, while the runners carry on
+    // forward, so it feels like they slow down rather than the ground stopping under them
+    if (o.off0 === null) o.off0 = player.off;
+    const k = 1 - Math.max(0, left) / CHECKPOINT.brake, to = doorD() - CHECKPOINT.stroll;
+    o.v = o.v0 * Math.sqrt(Math.max(0, left) / CHECKPOINT.brake);
+    player.off = o.off0 + (Math.max(o.off0, to) - o.off0) * smooth01(k);
+    if (left <= 0.5 || o.v < 4) {
+      o.d = W / 2; o.v = 0; o.state = 'stroll'; o.t = 0;
+      reachCheckpoint(o.k);
+      // anything still out there that could hurt them is gone; loot stays (and flies to them)
+      for (const lane of lanes) lane.obs = lane.obs.filter(x => x.type === 'coin' || x.type === 'item' || x.type === 'health');
+    }
+  } else if (o.state === 'stroll') {
+    magnetLoot(dt, gy);
+    player.off = Math.min(doorD(), player.off + CHECKPOINT.walk * dt);
+    if (player.off >= doorD() && o.t > 0.25) { o.state = 'open'; openShopScreen(); }
+  } else if (o.state === 'exit') {
+    // off they go: walking, then running, and the shop scrolls away behind them
+    const k = Math.min(1, o.t / CHECKPOINT.walkOut);
+    o.v = runSpeed() * k * k;
+    o.d -= speed * dt;
+    if (o.d + CHECKPOINT.halfW < -60) {
+      outpost = null;
+      nextBeat = 300; nextPlatform = 800; game.nextBiome = Math.max(game.nextBiome, distance + BIOME.gap[0] / 2);
+    }
+  }
+}
+// The runners walk on their own while braking for a shop and strolling up to it.
+const strolling = () => !!outpost && (outpost.state === 'stroll' || (outpost.state === 'approach' && outpost.off0 !== null));
+
+// A PNG design for a shop, once it's loaded (null until then, or if there isn't one).
+function shopImage(st) {
+  if (!st.img) return null;
+  if (!st.image) { st.image = new Image(); st.image.src = st.img; }
+  return st.image.complete && st.image.naturalWidth ? st.image : null;
+}
+// The building, in screen space, centered on cx with its floor at gy. Each lane draws only its own
+// half of it, so once it reaches the seam the two halves join into one building.
+function drawShopBuilding(cx, gy, st, k) {
+  const hw = CHECKPOINT.halfW, img = shopImage(st);
+  if (img) { const h = hw * 2 * img.height / img.width; ctx.drawImage(img, cx - hw, gy - h, hw * 2, h); return; }
+  const wallH = 180, top = gy - wallH, doorW = 58, doorH = 96;
+  ctx.save();
+  ctx.fillStyle = INK; ctx.fillRect(cx - hw - 16, gy - 10, hw * 2 + 32, 12);  // porch
+  ctx.fillStyle = st.wall; ctx.fillRect(cx - hw, top, hw * 2, wallH - 10);
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  if (st.kind === 'stone') {  // bricks
+    for (let y = top, row = 0; y < gy - 10; y += 22, row++) {
+      ctx.fillRect(cx - hw, y, hw * 2, 2);
+      for (let x = cx - hw + (row % 2 ? 24 : 0); x < cx + hw; x += 48) ctx.fillRect(x, y, 2, 22);
+    }
+  } else if (st.kind === 'cabin') for (let y = top + 16; y < gy - 10; y += 18) ctx.fillRect(cx - hw, y, hw * 2, 2);  // planks
+  else for (let x = cx - hw + 30; x < cx + hw; x += 60) ctx.fillRect(x, top, 3, wallH - 10);  // tent folds
+  // roof
+  ctx.fillStyle = st.roof;
+  if (st.kind === 'tent') {  // a striped, scalloped awning, peaked in the middle
+    ctx.beginPath(); ctx.moveTo(cx - hw - 26, top + 6); ctx.lineTo(cx, top - 110); ctx.lineTo(cx + hw + 26, top + 6); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = st.trim; ctx.globalAlpha = 0.85;
+    for (let i = -4; i < 4; i += 2) {
+      const a = i / 4, b = (i + 1) / 4;
+      ctx.beginPath(); ctx.moveTo(cx, top - 110); ctx.lineTo(cx + (hw + 26) * a, top + 6); ctx.lineTo(cx + (hw + 26) * b, top + 6); ctx.closePath(); ctx.fill();
+    }
+    ctx.globalAlpha = 1; ctx.fillStyle = st.roof;
+    for (let x = cx - hw - 26; x < cx + hw + 26; x += 31) { ctx.beginPath(); ctx.arc(x + 15.5, top + 6, 15.5, 0, Math.PI); ctx.fill(); }
+  } else {
+    ctx.beginPath(); ctx.moveTo(cx - hw - 34, top + 4); ctx.lineTo(cx - hw * 0.55, top - 92); ctx.lineTo(cx + hw * 0.55, top - 92); ctx.lineTo(cx + hw + 34, top + 4); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(cx - hw - 34, top, hw * 2 + 68, 6);
+    if (st.kind === 'stone') { ctx.fillStyle = st.roof; ctx.fillRect(cx + hw * 0.3, top - 130, 34, 50); }  // chimney
+  }
+  // sign over the middle, readable on both sides of the seam
+  ctx.font = '900 20px system-ui, sans-serif'; ctx.textAlign = 'center';
+  const sw = ctx.measureText(st.name).width + 40, sy = top - 56;
+  ctx.fillStyle = INK; ctx.beginPath(); ctx.roundRect(cx - sw / 2, sy, sw, 38, 8); ctx.fill();
+  ctx.strokeStyle = st.trim; ctx.lineWidth = 2.5; ctx.stroke();
+  ctx.fillStyle = st.trim; ctx.fillText(st.name, cx, sy + 26);
+  ctx.font = '800 12px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillText(`CHECKPOINT ${k}  ·  ${k * CHECKPOINT.every / 10} m`, cx, top + 22);
+  // one door per runner, lit from inside, with a window further out
+  for (const side of [-1, 1]) {
+    const dx = cx + side * hw * CHECKPOINT.doorAt, wx = cx + side * hw * 0.84;
+    const g = ctx.createLinearGradient(0, gy - 10 - doorH, 0, gy - 10);
+    g.addColorStop(0, st.glow); g.addColorStop(1, 'rgba(255,255,255,0.15)');
+    ctx.fillStyle = INK; ctx.beginPath(); ctx.roundRect(dx - doorW / 2 - 6, gy - 16 - doorH, doorW + 12, doorH + 6, [30, 30, 0, 0]); ctx.fill();
+    ctx.fillStyle = g; ctx.beginPath(); ctx.roundRect(dx - doorW / 2, gy - 10 - doorH, doorW, doorH, [26, 26, 0, 0]); ctx.fill();
+    ctx.fillStyle = INK; ctx.fillRect(wx - 22, top + 44, 44, 40);
+    ctx.fillStyle = st.glow; ctx.globalAlpha = 0.8; ctx.fillRect(wx - 18, top + 48, 36, 32); ctx.globalAlpha = 1;
+    ctx.fillStyle = INK; ctx.fillRect(wx - 1.5, top + 48, 3, 32); ctx.fillRect(wx - 18, top + 62, 36, 3);
+  }
+  // a lantern hanging on the seam, glowing a little
+  const ly = top + 40 + Math.sin(time * 2) * 2;
+  ctx.strokeStyle = INK; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx, top); ctx.lineTo(cx, ly); ctx.stroke();
+  ctx.shadowColor = st.glow; ctx.shadowBlur = 18; ctx.fillStyle = st.glow;
+  ctx.beginPath(); ctx.roundRect(cx - 8, ly, 16, 22, 5); ctx.fill();
+  ctx.restore();
 }
 
 // The run doesn't cut to the fight: new obstacles stop, the mouth of his lair comes into view past
@@ -2551,6 +2739,14 @@ function drawLane(lane, sky) {
   ctx.fillStyle = 'rgba(255,255,255,0.06)';
   for (let x = -(distance % 60); x < half; x += 60) ctx.fillRect(x, gy + 14 + (inView ? groundLift(lane, x + 13) : 0), 26, 3);
   if (boss) drawLair(boss.gateD, boss.exitD, gy, half);
+  if (outpost && outpost.d - CHECKPOINT.halfW < half + 40) {  // drawn unmirrored, so its sign reads right on both sides
+    // each side only has its own half of the building, so it reads as one shop split by the seam
+    const cx = lane.side < 0 ? outpost.d : W - outpost.d;
+    ctx.save(); if (lane.side > 0) { ctx.translate(W, 0); ctx.scale(-1, 1); }
+    ctx.beginPath(); ctx.rect(lane.side < 0 ? cx - CHECKPOINT.halfW - 80 : cx, 0, CHECKPOINT.halfW + 80, H); ctx.clip();
+    drawShopBuilding(cx, gy, shopStyle(outpost.k), outpost.k);
+    ctx.restore();
+  }
 
   // terrain first, so everything else is drawn on top of it
   const terrain = o => o.type === 'tunnel' || o.type === 'ledge' || o.type === 'pond';
@@ -3028,8 +3224,8 @@ function drawHotbars() {
 // The pause screen: each runner's inventory in its own half of the screen, hotbar on top, bag below.
 function menuLayout() {
   // panels shrink to leave room for the shop column in the middle
-  const S = Math.round(Math.max(34, Math.min(64, (W / 2 - shopWidth() - 68) / (BAG_COLS * 1.12), (H - Math.max(90, H * 0.16) - 280) / 6.4))), G = Math.round(S * 0.16);
-  const rowW = n => n * S + (n - 1) * G, top = Math.max(90, H * 0.16);
+  const S = Math.round(Math.max(34, Math.min(64, (W / 2 - shopWidth() - 68) / (BAG_COLS * 1.12), (H - menuTop() - 280) / 6.4))), G = Math.round(S * 0.16);
+  const rowW = n => n * S + (n - 1) * G, top = menuTop();
   return [-1, 1].map(side => {
     const cx = W / 2 + side * (shopWidth() / 2 + 16 + (rowW(BAG_COLS) + 44) / 2), slots = [];
     const hotY = top + 112, bagY = hotY + S + 44, armorY = bagY + rowW(BAG / BAG_COLS) + 40, accY = armorY + S + 34;
@@ -3046,6 +3242,7 @@ function menuLayout() {
   });
 }
 function menuSlotAt(px, py) {
+  if (!slotsShown()) return null;
   for (const p of menuLayout()) for (const s of p.slots) if (inRect(px, py, s)) return { side: s.side, i: s.i };
   return null;
 }
@@ -3055,7 +3252,7 @@ function menuSlotAt(px, py) {
 const SHOP = [{ key: 'grenade', price: 6 }, { key: 'bandage', price: 10 }, { key: 'obliterator', price: 1000 }];
 const shopWidth = () => Math.max(200, Math.min(300, W * 0.22));
 function shopLayout() {
-  const w = shopWidth(), x = W / 2 - w / 2, top = Math.max(90, H * 0.16), rowH = 74, icon = 50, h = menuLayout()[0].box.h;
+  const w = shopWidth(), x = W / 2 - w / 2, top = menuTop(), rowH = 74, icon = 50, h = menuLayout()[0].box.h;
   const rows = SHOP.map((e, i) => {
     const y = top + 82 + i * (rowH + 8), bx = x + 12 + icon + 10, bw = (x + w - 12 - bx - 6) / 2;
     return { ...e, x: x + 8, y, w: w - 16, h: rowH, icon: { x: x + 12, y: y + (rowH - icon) / 2, s: icon },
@@ -3064,13 +3261,12 @@ function shopLayout() {
   // the sell slot (only while the shop is open) and the trash, side by side above the note line
   const S = menuLayout()[0].slots[0].s, by = top + h - 62 - S, bins = menu.shopOpen ? ['sell', 'trash'] : ['trash'];
   const binSlots = bins.map((i, j) => ({ i, x: x + w / 2 - (bins.length * S + (bins.length - 1) * 28) / 2 + j * (S + 28), y: by, s: S }));
-  const toggle = menu.shopOpen ? { x: x + w - 74, y: top + 12, w: 62, h: 24 } : { x: x + 16, y: top + 82, w: w - 32, h: 40 };
-  return { x, top, w, h, rows: menu.shopOpen ? rows : [], bins: binSlots, toggle };
+  return { x, top, w, h, rows: menu.shopOpen ? rows : [], bins: slotsShown() ? binSlots : [] };
 }
-const shopToggleAt = (px, py) => game.paused && inBox(px, py, shopLayout().toggle);
-function setShopOpen(on) {
-  if (!on) menu.sold = null;  // closing the shop makes the last sale final
-  menu.shopOpen = on; menu.down = menu.drag = null;
+// Buying and selling only happen on a checkpoint shop's Shop tab. Switching away makes the last sale final.
+function setTab(id) {
+  if (id !== 'shop') menu.sold = null;
+  menu.tab = id; menu.shopOpen = menu.mode === 'shop' && id === 'shop'; menu.down = menu.drag = null;
 }
 const inBox = (px, py, b) => px >= b.x && px < b.x + b.w && py >= b.y && py < b.y + b.h;
 function shopButtonAt(px, py) {
@@ -3194,7 +3390,7 @@ function drawShop() {
   ctx.fillStyle = 'rgba(255,255,255,0.04)'; ctx.strokeStyle = '#ffd23f'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.roundRect(L.x, L.top, L.w, L.h, 14); ctx.fill(); ctx.globalAlpha = 0.45; ctx.stroke(); ctx.globalAlpha = 1;
   ctx.textAlign = 'center'; ctx.fillStyle = '#ffd23f'; ctx.font = '800 22px system-ui, sans-serif';
-  ctx.fillText('SHOP', cx, L.top + 36);
+  ctx.fillText(menu.shopOpen ? 'SHOP' : 'GOLD', cx, L.top + 36);
   ctx.font = '700 16px system-ui, sans-serif';
   const gold = fmtGold(wallet), gw = ctx.measureText(gold).width;
   drawCoin(cx - (gw + 22) / 2 + 8, L.top + 55, 8);
@@ -3220,16 +3416,10 @@ function drawShop() {
       ctx.globalAlpha = 1;
     }
   }
-  // open / close
-  const t = L.toggle, tHot = inBox(mouse.x, mouse.y, t);
-  ctx.fillStyle = tHot ? '#ffd23f' : 'rgba(255,255,255,0.08)'; ctx.strokeStyle = '#ffd23f'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.roundRect(t.x, t.y, t.w, t.h, 6); ctx.fill(); ctx.stroke();
-  ctx.textAlign = 'center'; ctx.fillStyle = tHot ? INK : '#ffd23f';
-  ctx.font = menu.shopOpen ? '700 12px system-ui, sans-serif' : '700 15px system-ui, sans-serif';
-  ctx.fillText(menu.shopOpen ? 'Close' : 'Open shop  (Tab)', t.x + t.w / 2, t.y + t.h / 2 + (menu.shopOpen ? 4 : 5));
   if (!menu.shopOpen) {
-    ctx.font = '500 13px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
-    for (const [i, l] of wrapText('Open the shop to buy, or to sell by shift-clicking items', L.w - 32).entries()) ctx.fillText(l, cx, t.y + t.h + 24 + i * 17);
+    ctx.textAlign = 'center'; ctx.font = '500 13px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    const msg = menu.mode === 'shop' ? 'Buying and selling are on the Shop tab' : `Buy and sell at the checkpoint shops, every ${CHECKPOINT.every / 10} m`;
+    for (const [i, l] of wrapText(msg, L.w - 32).entries()) ctx.fillText(l, cx, L.top + 100 + i * 17);
   }
   // the sell slot and the trash: hovering one with a dragged item lights it up
   for (const b of L.bins) {
@@ -3254,14 +3444,119 @@ function drawShop() {
   ctx.restore();
 }
 
+// ---------- Checkpoint shop screen ----------
+// The inventories and shop sit under a header with the shop's name, a row of tabs and a way out.
+const SHOP_TABS = [{ id: 'shop', label: 'Shop' }, { id: 'inventory', label: 'Inventory' },
+                   { id: 'checkpoints', label: 'Checkpoints' }, { id: 'offers', label: 'Offers', soon: true }];
+// the shop screen pushes everything down to fit its header
+const menuTop = () => (menu.mode === 'shop' ? Math.max(150, H * 0.2) : Math.max(90, H * 0.16));
+const slotsShown = () => menu.mode !== 'shop' || menu.tab === 'shop' || menu.tab === 'inventory';
+function shopScreenLayout() {
+  const top = menuTop(), n = SHOP_TABS.length, tabW = Math.min(150, (W - 420) / n), tabH = 34, gap = 8;
+  const ty = top - tabH - 16, x0 = W / 2 - (n * tabW + (n - 1) * gap) / 2;
+  const tabs = SHOP_TABS.map((t, i) => ({ ...t, x: x0 + i * (tabW + gap), y: ty, w: tabW, h: tabH, run: () => setTab(t.id) }));
+  const leave = { x: W - 196, y: ty, w: 172, h: tabH, run: () => setPaused(false) };
+  // the content box for the tabs that aren't the inventories
+  const bw = Math.min(980, W - 80), box = { x: W / 2 - bw / 2, y: top, w: bw, h: menuLayout()[0].box.h };
+  // checkpoint cards: every one reached, plus the next (locked)
+  const cw = 190, ch = 120, cols = Math.max(1, Math.floor((bw - 40 + 16) / (cw + 16))), rows = Math.max(1, Math.floor((box.h - 90 + 16) / (ch + 16)));
+  const count = bestCheckpoint + 2, first = Math.max(0, count - cols * rows), gx = box.x + (bw - (cols * (cw + 16) - 16)) / 2;
+  const cards = [];
+  for (let k = first; k < count; k++) {
+    const j = k - first, c = { k, x: gx + (j % cols) * (cw + 16), y: box.y + 74 + Math.floor(j / cols) * (ch + 16), w: cw, h: ch };
+    c.btn = { x: c.x + 14, y: c.y + ch - 42, w: cw - 28, h: 30, run: () => travelTo(k) };
+    cards.push(c);
+  }
+  return { top, ty, tabs, leave, box, cards };
+}
+function shopScreenButtonAt(px, py) {
+  if (!game.paused || menu.mode !== 'shop') return null;
+  const L = shopScreenLayout();
+  const hit = [...L.tabs, L.leave].find(b => inBox(px, py, b));
+  if (hit) return hit;
+  if (menu.tab !== 'checkpoints') return null;
+  const c = L.cards.find(c => inBox(px, py, c.btn) && c.k <= bestCheckpoint && c.k !== outpost.k);
+  return c ? c.btn : null;
+}
+function drawButton(b, label, color, { hot = false, active = false, dim = false, font = '700 15px' } = {}) {
+  ctx.save(); ctx.globalAlpha = dim ? 0.4 : 1;
+  ctx.fillStyle = active ? color : hot ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.06)';
+  ctx.strokeStyle = color; ctx.lineWidth = active ? 0 : 1.5;
+  ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 8); ctx.fill(); if (!active) ctx.stroke();
+  ctx.textAlign = 'center'; ctx.font = font + ' system-ui, sans-serif'; ctx.fillStyle = active ? INK : color;
+  ctx.fillText(label, b.x + b.w / 2, b.y + b.h / 2 + 5);
+  ctx.restore();
+}
+function drawShopScreen() {
+  const st = shopStyle(outpost.k), L = shopScreenLayout(), ac = st.accent;
+  // tinted backdrop and an awning along the top, in this shop's colors
+  ctx.save();
+  const g = ctx.createRadialGradient(W / 2, H * 0.3, 50, W / 2, H * 0.3, W * 0.7);
+  g.addColorStop(0, st.wall + 'aa'); g.addColorStop(1, 'rgba(8,6,12,0.6)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const aw = 46;
+  for (let i = 0, x = 0; x < W; i++, x += aw) {
+    ctx.fillStyle = i % 2 ? st.roof : st.trim;
+    ctx.fillRect(x, 0, aw, 16); ctx.beginPath(); ctx.arc(x + aw / 2, 16, aw / 2, 0, Math.PI); ctx.fill();
+  }
+  ctx.textAlign = 'center';
+  ctx.font = '900 34px system-ui, sans-serif'; ctx.lineWidth = 6; ctx.strokeStyle = INK; ctx.lineJoin = 'round';
+  ctx.strokeText(st.name.toUpperCase(), W / 2, L.ty - 34); ctx.fillStyle = ac; ctx.fillText(st.name.toUpperCase(), W / 2, L.ty - 34);
+  ctx.font = '700 14px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillText(`CHECKPOINT ${outpost.k}   ·   ${outpost.k * CHECKPOINT.every / 10} m   ·   ${fmtGold(wallet)} gold`, W / 2, L.ty - 12);
+  for (const t of L.tabs) drawButton(t, t.soon ? t.label + ' · soon' : t.label, ac, { hot: inBox(mouse.x, mouse.y, t), active: menu.tab === t.id, dim: t.soon && menu.tab !== t.id });
+  drawButton(L.leave, 'Leave  (Space) ▶', '#5bd16a', { hot: inBox(mouse.x, mouse.y, L.leave) });
+  // help line under the panels
+  ctx.font = '500 14px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.textAlign = 'center';
+  const help = { shop: 'buy with ◀ / ▶ to pick who gets it   ·   shift-click to sell   ·   drag to the trash to throw away   ·   drag back out to undo',
+                 inventory: 'drag to organize   ·   click a hotbar slot to hold it   ·   click armor to wear it   ·   shift-click to trash',
+                 checkpoints: 'travel to any checkpoint you\'ve reached, keeping everything you\'re carrying',
+                 offers: '' }[menu.tab];
+  ctx.fillText(help + '   ·   Tab to switch tabs', W / 2, Math.min(H - 10, L.box.y + L.box.h + 24));
+  if (!slotsShown()) {
+    const b = L.box;
+    ctx.fillStyle = 'rgba(255,255,255,0.04)'; ctx.strokeStyle = ac; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 14); ctx.fill(); ctx.globalAlpha = 0.45; ctx.stroke(); ctx.globalAlpha = 1;
+    ctx.fillStyle = ac; ctx.font = '800 22px system-ui, sans-serif';
+    if (menu.tab === 'checkpoints') {
+      ctx.fillText('CHECKPOINTS', W / 2, b.y + 40);
+      for (const c of L.cards) {
+        const here = c.k === outpost.k, open = c.k <= bestCheckpoint, cs = shopStyle(c.k);
+        ctx.fillStyle = here ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.05)'; ctx.strokeStyle = open ? cs.accent : 'rgba(255,255,255,0.2)'; ctx.lineWidth = here ? 2.5 : 1.5;
+        ctx.beginPath(); ctx.roundRect(c.x, c.y, c.w, c.h, 10); ctx.fill(); ctx.stroke();
+        ctx.textAlign = 'left'; ctx.font = '800 16px system-ui, sans-serif'; ctx.fillStyle = open ? '#fff' : 'rgba(255,255,255,0.4)';
+        ctx.fillText(`Checkpoint ${c.k}`, c.x + 14, c.y + 26);
+        ctx.font = '600 13px system-ui, sans-serif'; ctx.fillStyle = open ? cs.accent : 'rgba(255,255,255,0.3)';
+        ctx.fillText(open ? `${cs.name}  ·  ${c.k * CHECKPOINT.every / 10} m` : `??? · ${c.k * CHECKPOINT.every / 10} m`, c.x + 14, c.y + 46);
+        if (here) drawButton(c.btn, 'You are here', cs.accent, { active: true, font: '700 13px' });
+        else if (open) drawButton(c.btn, 'Travel', cs.accent, { hot: inBox(mouse.x, mouse.y, c.btn), font: '700 13px' });
+        else drawButton(c.btn, 'Reach it to unlock', 'rgba(255,255,255,0.5)', { dim: true, font: '700 13px' });
+      }
+    } else {
+      ctx.fillText('SPECIAL OFFERS & ACHIEVEMENTS', W / 2, b.y + 40);
+      ctx.font = '600 16px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillText('Coming soon.', W / 2, b.y + b.h / 2);
+    }
+    // what just happened (travelling, or why not)
+    const n = menu.note, age = n ? performance.now() - n.at : Infinity;
+    if (age < 2200) { ctx.globalAlpha = Math.min(1, (2200 - age) / 400); ctx.textAlign = 'center'; ctx.font = '700 15px system-ui, sans-serif'; ctx.fillStyle = n.color; ctx.fillText(n.text, W / 2, b.y + b.h - 20); }
+  }
+  ctx.restore();
+}
+
 function drawInventory() {
   ctx.save();
   ctx.fillStyle = 'rgba(8,6,12,0.8)'; ctx.fillRect(0, 0, W, H);
-  ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
-  ctx.font = '900 40px system-ui, sans-serif'; ctx.fillText('PAUSED', W / 2, Math.max(50, H * 0.16 - 34));
-  ctx.font = '500 15px system-ui, sans-serif'; ctx.globalAlpha = 0.6;
-  ctx.fillText('Esc to resume   ·   drag items to organize   ·   click a hotbar slot to hold it   ·   click armor to wear it   ·   shift-click to trash (or sell, with the shop open)', W / 2, Math.max(50, H * 0.16 - 34) + 26);
-  ctx.globalAlpha = 1;
+  if (menu.mode === 'shop') {
+    drawShopScreen();
+    if (!slotsShown()) { ctx.restore(); return; }
+  } else {
+    ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
+    ctx.font = '900 40px system-ui, sans-serif'; ctx.fillText('PAUSED', W / 2, Math.max(50, H * 0.16 - 34));
+    ctx.font = '500 15px system-ui, sans-serif'; ctx.globalAlpha = 0.6;
+    ctx.fillText('Esc to resume   ·   drag items to organize   ·   click a hotbar slot to hold it   ·   click armor to wear it   ·   shift-click to trash', W / 2, Math.max(50, H * 0.16 - 34) + 26);
+    ctx.globalAlpha = 1;
+  }
   const layout = menuLayout();
   for (const p of layout) {
     const r = laneFor(p.side).body, accent = SKIES[p.side].accent, b = p.box;
