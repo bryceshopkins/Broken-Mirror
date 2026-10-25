@@ -1589,8 +1589,10 @@ const shopStyle = k => SHOP_STYLES[k % SHOP_STYLES.length];
 let outpost = null;  // the checkpoint shop on the course: { k, state, t, d (lane distance of its center), v }
 let bestCheckpoint = 0;
 try { bestCheckpoint = Number(localStorage.getItem('mirrorrun.checkpoint')) || 0; } catch (e) {}
+// The next shop is due at the next 1000 m mark, but never sooner than half a checkpoint away: one
+// that was held up (by a long tunnel or cave, or Gronk) could otherwise arrive past that mark already.
 function reachCheckpoint(k) {
-  game.checkpoint = k; game.nextCheckpoint = (k + 1) * CHECKPOINT.every;
+  game.checkpoint = k; game.nextCheckpoint = Math.max((k + 1) * CHECKPOINT.every, distance + CHECKPOINT.every / 2);
   if (k > bestCheckpoint) { bestCheckpoint = k; try { localStorage.setItem('mirrorrun.checkpoint', k); } catch (e) {} }
 }
 const doorD = () => W / 2 - CHECKPOINT.halfW * CHECKPOINT.doorAt;
@@ -1605,7 +1607,8 @@ function startOutpost(k) {
 }
 // Called every frame outside a shop: one is due every CHECKPOINT.every, but waits for Gronk or a tunnel/cave to be over.
 function maybeStartOutpost() {
-  if (!outpost && !boss && !game.biome && distance >= game.nextCheckpoint) startOutpost(Math.round(game.nextCheckpoint / CHECKPOINT.every));
+  // (a late one takes the number of the mark it's past, skipping any it missed)
+  if (!outpost && !boss && !game.biome && distance >= game.nextCheckpoint) startOutpost(Math.max(game.checkpoint + 1, Math.floor(distance / CHECKPOINT.every)));
 }
 // Standing at a shop's door with the shop screen open (the start of a run, or after travelling).
 function openOutpost(k) {
