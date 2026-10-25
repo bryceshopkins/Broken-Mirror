@@ -1584,7 +1584,9 @@ const CHECKPOINT = {
   every: 10000,       // px between checkpoints (1000 m)
   halfW: 230,         // half the building's width; it's centered on the seam
   doorAt: 0.5,        // how far out from the seam each door is (fraction of halfW)
-  reach: [-90, 220],  // E works while a runner's door is this far behind / ahead of them (px)
+  slow: 110,          // the world's speed while a shop is on screen, so there's plenty of time to go in (px/s)
+  hurry: 1.6,         // holding D (forward) past a shop speeds it up to this x normal running speed instead
+  ease: 2.5,          // how quickly the speed eases between those (per s)
   brake: 900,         // how hard the world stops when you go in (px/s per s)
   walk: 260,          // how fast they walk to the door (px/s)
   walkOut: 1.6,       // s to go from standing to full running speed on the way out
@@ -1648,9 +1650,9 @@ function travelTo(k) {
 }
 // Where a shop's door (the one on each runner's side) is right now, in lane distance.
 const doorOf = o => o.d - CHECKPOINT.halfW * CHECKPOINT.doorAt;
-// Shops are optional: one rolls past like the scenery, and while a door is close you can press E to go in.
-const canEnter = () => !!outpost && outpost.state === 'pass' && !game.paused &&
-  doorOf(outpost) - player.off > CHECKPOINT.reach[0] && doorOf(outpost) - player.off < CHECKPOINT.reach[1];
+// Shops are optional: one rolls past like the scenery, and the whole time it's on screen you can press E to go in.
+const shopOnScreen = o => o.d - CHECKPOINT.halfW < W / 2 && o.d + CHECKPOINT.halfW > 0;
+const canEnter = () => !!outpost && outpost.state === 'pass' && !game.paused && shopOnScreen(outpost);
 function enterOutpost() {
   if (!canEnter()) return;
   outpost.state = 'enter'; outpost.t = 0;
@@ -1661,9 +1663,12 @@ function updateOutpost(dt, gy) {
   const o = outpost;
   o.t += dt;
   // passing the door counts as reaching the checkpoint, whether you go in or not
-  if (!o.reached && doorOf(o) - player.off < CHECKPOINT.reach[1]) { o.reached = true; reachCheckpoint(o.k); }
+  if (!o.reached && shopOnScreen(o)) { o.reached = true; reachCheckpoint(o.k); }
   if (o.state === 'pass') {
-    o.v = runSpeed();
+    // slow to a jog while it's on screen (or hurry past it, holding D), then back up to speed once it's behind them
+    const behind = o.d + CHECKPOINT.halfW < player.off;
+    const want = behind ? runSpeed() : keys['d'] ? runSpeed() * CHECKPOINT.hurry : shopOnScreen(o) ? CHECKPOINT.slow : runSpeed();
+    o.v += (want - o.v) * Math.min(1, CHECKPOINT.ease * dt);
     o.d -= speed * dt;
     if (o.d + CHECKPOINT.halfW < -60) leaveOutpost();
   } else if (o.state === 'enter') {
