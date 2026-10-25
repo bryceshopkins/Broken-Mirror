@@ -271,7 +271,7 @@ const ITEMS = {
           range: 145, swing: { dur: 0.7, hit: [0.36, 1] },  // live from the downswing on, so spam-clicking covers you
           desc: 'Hey batter batter batter- the perfect tool for any major league baseball player, as long as that major league baseball player has a fetish for turning people into pancakes.' },
   axe: { name: 'Battle Axe', rarity: 'rare', melee: true, anim: 'club', attackSpeed: 'slow', min: 25, max: 25, critChance: 0.2, critMult: 2,
-         range: 175, block: 0.1, swing: { dur: 0.7, hit: [0.36, 1] },
+         range: 85, block: 0.1, swing: { dur: 0.7, hit: [0.36, 1] },
          desc: 'One swing from this can split you in two... again... I guess.' },
   // shop items
   grenade: { name: 'Grenade', rarity: 'uncommon', stack: 20, attackSpeed: 'slow', min: 50, max: 50, critChance: 0, critMult: 1,
@@ -327,8 +327,10 @@ const SHURIKEN_DROP_WEIGHTS = [0, 0, 4, 8, 12, 14, 14, 13, 11, 9, 7, 5, 3];  // 
 const NINJA_CHANCE = 0.25;  // chance a plain enemy spawns as a thrower instead (about 2.5 walkers per ninja overall)
 // Brutes show up once Gronk is down: slow and thick, swinging a huge axe in an overhead arc that
 // covers everything in front of them and above their head, so hopping over one gets you chopped.
-// Slide under the swing. Every hit knocks them back about as far as the ground scrolls before
-// your next attack, so you can keep laying into one instead of it walking through you.
+// Slide under the swing. Every hit knocks them back as far as the ground scrolls before your next
+// attack, and stuns them (cancelling a windup) for a bit longer than that weapon's attack interval,
+// so attacking at full rate keeps one locked down in place. Miss one and he comes out of it with a quick
+// swing that he's committed to: hitting him then won't stop it, so slide.
 const BRUTE = {
   chance: 0.25,                 // chance a beat is a brute beat (only one brute out at a time)
   hp: 90, walk: 10,             // walk: px/s toward you, on top of the scrolling ground
@@ -336,7 +338,10 @@ const BRUTE = {
   zone: { lo: 40, hi: 240 },    // the height band the swing covers, above his feet (a slide gets under it)
   windup: 0.6, swing: 0.16, recover: 0.45, cycle: 1.6,  // cycle: s from the start of one windup to the next
   endA: 0.35,                   // axe angle where the swing ends (0 = straight forward, negative = up)
-  kbDecay: 8, kbExtra: 20,      // knockback eases out at this rate; kbExtra = px of ground gained per hit
+  stun: 1.5,                    // stun per hit, in attack intervals of the weapon that landed it
+  counter: 0.3,                 // windup of the swing he throws the moment a stun runs out (hits can't stop this one)
+  kbDecay: 8,                   // knockback eases out at this rate
+  keepOff: 55,                  // a hit always shoves him at least back out to here, so he can't creep into you
   axeDrop: 0.1,
 };
 const BRUTE_PATTERNS = [[['brute'], []], [['brute'], ['enemy', 200]], [['brute'], ['thrower', 150]], [['brute'], ['block', 120]]];
@@ -614,7 +619,7 @@ function spawnObstacle(lane, type, extra = 0, y = 0, placed = false) {
   const o = { type, d, y: y - lift, hit: false, dead: false, hp: ENEMY_HP, t: Math.random() * 6,
               walks: type === 'enemy' && !placed && (!kind || kind === 'brute') };
   if (kind === 'thrower') { o.kind = kind; o.throwCd = 0.05 + Math.random() * 0.25; o.windT = 0; o.relT = 0; }
-  if (kind === 'brute') Object.assign(o, { kind, hp: BRUTE.hp, maxHp: BRUTE.hp, kb: 0, cd: 0.3, windT: 0, swingT: 0, recT: 0, flashT: 0 });
+  if (kind === 'brute') Object.assign(o, { kind, hp: BRUTE.hp, maxHp: BRUTE.hp, kb: 0, cd: 0.3, windT: 0, windMax: BRUTE.windup, swingT: 0, recT: 0, stunT: 0, counter: false, flashT: 0 });
   if (type === 'tunnel') { o.depth = TUNNEL.depth; o.gap = TUNNEL.gap; }
   if (isTerrain) { o.len = len; o.d += len / 2; settleOnto(lane, o); }
   lane.obs.push(o);
@@ -1094,32 +1099,45 @@ function bounceOffCeiling(o, r) {
 const overlaps = (a, b) => a.d0 < b.d1 && a.d1 > b.d0 && a.y0 < b.y1 && a.y1 > b.y0;
 
 // Brutes lumber forward and, once you're in reach (or right over them), wind up and swing.
-const bruteBusy = o => o.windT > 0 || o.swingT > 0 || o.recT > 0;
+const bruteBusy = o => o.windT > 0 || o.swingT > 0 || o.recT > 0 || o.stunT > 0;
+const bruteInReach = (lane, o) => { const gap = o.d - player.off;
+  return gap < BRUTE.reach + 30 && gap > -30 && o.d < W / 2 - 20 && Math.abs(lane.body.y - o.y) < 260; };
+function bruteWindup(o, t) { o.windT = o.windMax = t; o.cd = BRUTE.cycle; }
 const bruteZone = (o, gy) => ({ d0: o.d - BRUTE.reach, d1: o.d + 30, y0: gy + o.y - BRUTE.zone.hi, y1: gy + o.y - BRUTE.zone.lo });
 function updateBrute(lane, o, dt) {
   o.flashT -= dt; o.cd -= dt;
-  if (o.kb > 1) { o.d = Math.min(W / 2 - 30, o.d + o.kb * dt); o.kb *= Math.exp(-BRUTE.kbDecay * dt); } else o.kb = 0;
-  if (o.windT > 0) {
-    o.windT -= dt;
-    if (o.windT <= 0) { o.swingT = BRUTE.swing; o.swingHit = false; }
-    return;
-  }
-  if (o.swingT > 0) {
+  if (o.kb > 1) {  // eased out exactly, whatever the frame rate, so a shove covers just what it's meant to
+    const ease = Math.exp(-BRUTE.kbDecay * dt);
+    o.d = Math.min(W / 2 - 30, o.d + o.kb / BRUTE.kbDecay * (1 - ease)); o.kb *= ease;
+  } else o.kb = 0;
+  // dazed or bracing to swing back, he stands his ground: running into him just pushes him along
+  if ((o.stunT > 0 || o.counter) && Math.abs(lane.body.y - o.y) < 60) o.d = Math.max(o.d, player.off + 38);
+  if (o.swingT > 0) {  // an axe already coming down can't be stopped
     o.swingT -= dt;
     if (o.swingT <= 0) { o.recT = BRUTE.recover; burst(o.d - BRUTE.reach * 0.7, groundY() + o.y - 50, 10, 0.6, lane.side, '#ffffff'); }
     return;
   }
-  if (o.recT > 0) { o.recT -= dt; return; }
-  const gap = o.d - player.off;
-  if (o.cd <= 0 && gap < BRUTE.reach + 30 && gap > -30 && o.d < W / 2 - 20 && Math.abs(lane.body.y - o.y) < 260) {
-    o.windT = BRUTE.windup; o.cd = BRUTE.cycle;
+  if (o.stunT > 0) {  // shaking it off; the moment he does, he swings back fast if you're still in reach
+    o.stunT -= dt;
+    if (o.stunT <= 0) { o.recT = 0; o.cd = 0; if (bruteInReach(lane, o)) { bruteWindup(o, BRUTE.counter); o.counter = true; } }
+    return;
   }
+  if (o.windT > 0) {
+    o.windT -= dt;
+    if (o.windT <= 0) { o.swingT = BRUTE.swing; o.swingHit = false; o.counter = false; }
+    return;
+  }
+  if (o.recT > 0) { o.recT -= dt; return; }
+  if (o.cd <= 0 && bruteInReach(lane, o)) bruteWindup(o, BRUTE.windup);
 }
-// Hits shove a brute back: enough to cover the ground that scrolls by before this weapon is ready
-// again, plus a little, so the fight stays in front of you.
+// Hits shove a brute back: just enough to cover the ground that scrolls by before this weapon is
+// ready again (and never leaving him in your face), so a steady rhythm keeps him right where your hits land.
 function knockBrute(o, weapon) {
-  const push = speed / ATTACK_SPEED[weapon.attackSpeed] + BRUTE.kbExtra;
-  o.kb = Math.max(o.kb, push * BRUTE.kbDecay);  // eased out, it covers push px in total
+  if (o.counter) return;  // already swinging back: he takes the hit but doesn't budge
+  const push = speed / ATTACK_SPEED[weapon.attackSpeed] + Math.max(0, BRUTE.keepOff - (o.d - player.off));
+  o.kb += push * BRUTE.kbDecay;  // eased out, it covers push px more than whatever shove was still left
+  // and stun him a little longer than it takes this weapon to come around again
+  o.stunT = BRUTE.stun / ATTACK_SPEED[weapon.attackSpeed]; o.windT = 0;
 }
 
 // Throwers stand their ground and, once on screen, wind up and toss a slow shuriken every few seconds.
@@ -2023,8 +2041,8 @@ const drawMelee = (key, x, y, a, s, color) => (key === 'axe' ? drawAxe : drawClu
 // The axe rests back over his shoulder, heaves further back to wind up, then comes over the top.
 function drawBrute(x, gy, o) {
   const ink = o.flashT > 0 ? '#ffffff' : INK;
-  const winding = o.windT > 0, swinging = o.swingT > 0, staggered = o.kb > 30;
-  const wk = winding ? 1 - o.windT / BRUTE.windup : 0;
+  const winding = o.windT > 0, swinging = o.swingT > 0, stunned = o.stunT > 0 && !swinging, staggered = o.kb > 30 || stunned;
+  const wk = winding ? 1 - o.windT / o.windMax : 0;
   ctx.save(); ctx.translate(x, gy); ctx.scale(-1, 1);  // local: +x faces the runner, 0 is his feet
   ctx.strokeStyle = ink; ctx.fillStyle = ink; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   const walk = winding || swinging || o.recT > 0 || staggered ? 0 : Math.sin(o.t * 5);
@@ -2065,6 +2083,14 @@ function drawBrute(x, gy, o) {
     ctx.fillStyle = '#ff3b3b';
     ctx.fillRect(x - 3 * s, gy - 168 + (1 - s) * 10, 6 * s, 18 * s);
     ctx.beginPath(); ctx.arc(x, gy - 142, 3.5 * s, 0, Math.PI * 2); ctx.fill();
+  }
+  if (stunned) {  // dazed: little stars circling his head
+    ctx.save(); ctx.fillStyle = '#ffd23f';
+    for (let i = 0; i < 3; i++) {
+      const s = time * 9 + i * Math.PI * 2 / 3;
+      ctx.beginPath(); ctx.arc(x - 9 + Math.cos(s) * 18, gy - 126 + Math.sin(s) * 5, 3, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
   }
   if (o.hp < o.maxHp) {  // a little health bar once he's been hit
     const w = 46, bx = x - w / 2, by = gy - 132;
