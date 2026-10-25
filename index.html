@@ -360,6 +360,10 @@ const MAX_HP = 100, INVULN_T = 1.2;  // s of invulnerability after a hit (each r
 // enemies sometimes drop (only while that runner is hurt), and a few big ones from every boss.
 const REGEN = { delay: 5, rate: 0.35 };  // s after a hit before it starts; HP per second
 const HEALTH_DROP = { chance: 0.08, enemyHeal: 10, bossHeal: 25, bossCount: 2 };
+// Dropped loot at speed. `carry`: share of the run's speed above BASE_SPEED that a drop keeps as it flies out,
+// so it doesn't whip past overhead at a full sprint (below 1 so the fastest runs still lose some).
+// `magnet`: radius (px from the runner's middle) that pulls a drop in, growing from base to top speed.
+const PICKUP = { carry: 0.5, magnet: [35, 65], pull: 14 };
 const DAMAGE = { cspike: 20, brute: 25, axe: 35, enemy: 20, star: 15, spike: 25, bar: 25, block: 15, ledge: 15, wave: 25, club: 35, rage: 45, piranha: 20, knifer: 30 };
 const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5, waterDrag: 0.35 };  // thrown at chest height; waterDrag = speed kept underwater
 const SHURIKEN_DROP_WEIGHTS = [0, 0, 4, 8, 12, 14, 14, 13, 11, 9, 7, 5, 3];  // index = how many a thrower drops (2-12, usually 4-8)
@@ -446,6 +450,11 @@ function addItem(r, key, n = 1) {
     if (!r.inv[i]) { const k = Math.min(n, max); r.inv[i] = { key, n: k }; n -= k; }
   }
   return true;
+}
+// Whether one more of an item would fit (same rules as addItem).
+function roomFor(r, key) {
+  if (ITEMS[key].equip && r.inv.some((s, i) => !s && i >= EQUIP0 && fitsSlot(key, i))) return true;
+  return r.inv.slice(0, EQUIP0).some(s => !s || (s.key === key && s.n < maxStack(key)));
 }
 // Drag-and-drop: drop onto the same item to merge the stacks, otherwise the two slots swap.
 // Nothing moves if either item would end up in an equipment slot it isn't made for.
@@ -1196,17 +1205,31 @@ function rollCoinDrop() {
 }
 function dropHealth(lane, e, heal) {
   lane.obs.push({ type: 'health', heal, d: e.d, y: e.y - 40, t: Math.random() * 6, dead: false, hit: false,
-                  vd: 40 + Math.random() * 160, vy: -420 - Math.random() * 200, grace: 0.15 });
+                  vd: 40 + Math.random() * 160 + dropCarry(), vy: -420 - Math.random() * 200, grace: 0.15 });
 }
 function dropCoins(lane, e) {
   const n = rollCoinDrop();
   for (let i = 0; i < n; i++) lane.obs.push({
     type: 'coin', d: e.d, y: e.y - 40, t: Math.random() * 6, dead: false, hit: false,
-    vd: 40 + Math.random() * 200, vy: -380 - Math.random() * 260, grace: 0.15 });  // fly toward the seam so they come back to you
+    vd: 40 + Math.random() * 200 + dropCarry(), vy: -380 - Math.random() * 260, grace: 0.15 });  // fly toward the seam so they come back to you
+}
+const speedK = () => Math.max(0, Math.min(1, (speed - BASE_SPEED) / (MAX_SPEED - BASE_SPEED)));
+const dropCarry = () => Math.max(0, speed - BASE_SPEED) * PICKUP.carry;
+// Once a drop you can take comes within reach it's pulled in, riding along with the run until it's grabbed.
+function magnetDrop(lane, o, dt) {
+  const r = lane.body;
+  if (o.grace > 0 || (o.type === 'health' && r.hp >= MAX_HP) || (o.type === 'item' && !roomFor(r, o.item))) { o.magnet = false; return false; }
+  const dx = player.off - o.d, dy = r.y - 35 - o.y, rad = PICKUP.magnet[0] + (PICKUP.magnet[1] - PICKUP.magnet[0]) * speedK();
+  if (!o.magnet && dx * dx + dy * dy * 0.6 > rad * rad) return false;
+  o.magnet = true; o.vy = null; o.vd = 0;
+  const k = Math.min(1, PICKUP.pull * dt);
+  o.d += speed * dt + dx * k; o.y += dy * k;
+  return true;
 }
 // Dropped coins fly out, then settle on whatever is beneath them (ground, ledge, platform, tunnel floor).
 function updateDroppedCoin(lane, o, dt) {
   o.grace -= dt;
+  if (magnetDrop(lane, o, dt)) return;
   if (o.vy === null) return;
   o.vy += 1400 * dt; o.y += o.vy * dt; o.d += o.vd * dt;
   bounceOffCeiling(o, 14, lane.side);
@@ -1363,7 +1386,7 @@ function rollWeighted(weights) {
 function dropItems(lane, e, item, n) {
   for (let i = 0; i < n; i++) lane.obs.push({
     type: 'item', item, d: e.d, y: e.y - 40, t: Math.random() * 6, dead: false, hit: false,
-    vd: 40 + Math.random() * 200, vy: -420 - Math.random() * 260, grace: 0.15 });
+    vd: 40 + Math.random() * 200 + dropCarry(), vy: -420 - Math.random() * 260, grace: 0.15 });
 }
 // Terraria-style pickup label over the runner who grabbed it; repeat pickups merge into "(2)", "(3)"...
 function addLabel(lane, key) {
