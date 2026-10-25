@@ -471,40 +471,48 @@ function biomeAt(d) {
 // Does a biome (of this kind, if given) cover any of lane distances a-b?
 const biomeOver = (a, b, kind = null) => !!game.biome && (!kind || game.biome.kind === kind) &&
   distance + b > game.biome.start && distance + a < game.biome.end;
+// Both worlds get the same biome at the same time with the same overall heights, but the details
+// differ a little per side: where a tunnel's steps fall and how high each one is, how much its floor
+// is raised, the cave roof's waves and stalactites, and the floor bumps. `side` is the lane's side.
+const sideSeed = (b, side) => b.seed + (side > 0 ? 517 : 0);
+const tunnelLift = (b, side) => BIOME.tunnel.lift + (hash01(sideSeed(b, side) + 0.5) - 0.5) * 16;  // 32-48
 // How far the floor is raised at d (negative = up), not counting holes or ponds. Cave bumps flatten
 // out around ponds, so the water always sits at the normal floor line.
 function groundLift(lane, d) {
   const z = biomeAt(d);
   if (!z) return 0;
-  if (z.b.kind === 'tunnel') return -BIOME.tunnel.lift * z.k;
-  const s = z.b.seed;
+  if (z.b.kind === 'tunnel') return -tunnelLift(z.b, lane.side) * z.k;
+  const s = sideSeed(z.b, lane.side);
   let bump = (Math.sin(z.w / 97 + s) * 0.6 + Math.sin(z.w / 41 + s * 2.3) * 0.4) * BIOME.cave.bump * z.k;
   for (const p of lane.obs) if (p.type === 'pond' && !p.dead) bump *= smooth01((Math.abs(d - p.d) - p.len / 2) / 90);
   return bump;
 }
 // The ceiling's y at d (negative = up, like everything else), or null under open sky. On the slopes it
 // comes down from above the top of the screen.
-function ceilingAt(d) {
+function ceilingAt(d, side) {
   const z = biomeAt(d);
   if (!z) return null;
-  const { b, k } = z, u = z.w - b.start;
-  let h, lift = 0;
+  const { b, k } = z, ss = sideSeed(b, side);
+  let h, lift = 0, u = z.w - b.start;
   if (b.kind === 'tunnel') {  // flat stretches at different heights, with short slopes between them
-    const T = BIOME.tunnel, i = Math.floor(u / T.step), f = u - i * T.step;
-    const level = n => T.h[0] + hash01(b.seed + n) * (T.h[1] - T.h[0]);
+    const T = BIOME.tunnel;
+    u += side * 110;  // the two sides change height at different spots
+    const i = Math.floor(u / T.step), f = u - i * T.step;
+    // mostly the shared height, nudged up or down a bit per side
+    const level = n => T.h[0] + (hash01(b.seed + n) * 0.75 + hash01(ss + n) * 0.25) * (T.h[1] - T.h[0]);
     h = level(i) + (level(i + 1) - level(i)) * smooth01((f - (T.step - T.blend)) / T.blend);
-    lift = T.lift * k;
+    lift = tunnelLift(b, side) * k;
   } else {  // a wavy roof with a stalactite in every cell
-    const C = BIOME.cave, i = Math.floor(u / C.tooth), f = (u - i * C.tooth) / C.tooth;
-    h = C.h[0] + (C.h[1] - C.h[0]) * (0.5 + 0.3 * Math.sin(u / 310 + b.seed) + 0.2 * Math.sin(u / 133 + b.seed * 1.7));
-    h -= (C.toothDepth[0] + hash01(b.seed * 3 + i) * (C.toothDepth[1] - C.toothDepth[0])) * Math.max(0, 1 - Math.abs(f - 0.5) / 0.3);
+    const C = BIOME.cave, i = Math.floor((u + (side > 0 ? C.tooth * 0.4 : 0)) / C.tooth), f = (u + (side > 0 ? C.tooth * 0.4 : 0) - i * C.tooth) / C.tooth;
+    h = C.h[0] + (C.h[1] - C.h[0]) * (0.5 + 0.3 * Math.sin(u / 310 + b.seed + side * 0.35) + 0.2 * Math.sin(u / 133 + ss * 1.7));
+    h -= (C.toothDepth[0] + hash01(ss * 3 + i) * (C.toothDepth[1] - C.toothDepth[0])) * Math.max(0, 1 - Math.abs(f - 0.5) / 0.3);
   }
   return -lift - ((groundY() + 120) * (1 - k) + h * k);
 }
 // The lowest bit of ceiling over a box from d0 to d1 (null if it's all open).
-function roofOver(d0, d1) {
+function roofOver(d0, d1, side) {
   let lo = null;
-  for (let x = d0; x <= d1 + 0.01; x += (d1 - d0) / 2 || 1) { const c = ceilingAt(x); if (c !== null && (lo === null || c > lo)) lo = c; }
+  for (let x = d0; x <= d1 + 0.01; x += (d1 - d0) / 2 || 1) { const c = ceilingAt(x, side); if (c !== null && (lo === null || c > lo)) lo = c; }
   return lo;
 }
 // A new biome somewhere ahead: past everything already on the course (so no ledge or hole ends up
@@ -534,7 +542,7 @@ function spawnCeilingSpike(lane, extra) {
   const d = W / 2 + 60 + extra, z = biomeAt(d - 30), z2 = biomeAt(d + 30);
   if (!z || !z2 || z.k < 1 || z2.k < 1) return null;
   if (lane.obs.some(o => (o.type === 'block' || o.type === 'spike' || o.type === 'bar' || o.type === 'cspike') && Math.abs(o.d - d) < 110)) return null;
-  const o = { type: 'cspike', d, y: roofOver(d - 16, d + 16), t: 0, dead: false, hit: false };
+  const o = { type: 'cspike', d, y: roofOver(d - 16, d + 16, lane.side), t: 0, dead: false, hit: false };
   lane.obs.push(o);
   return o;
 }
@@ -762,7 +770,7 @@ function updateRunner(lane, r, gy, dt) {
   r.vy += (keys['s'] ? GRAVITY * 2.4 : GRAVITY) * dt;  // S = fast fall
   r.y += r.vy * dt;
   // a tunnel or cave ceiling: jump into it and you bonk your head and come back down
-  const roof = roofOver(player.off - 10, player.off + 10);
+  const roof = roofOver(player.off - 10, player.off + 10, lane.side);
   if (roof !== null && r.y - 70 < roof) {
     r.y = roof + 70;
     if (r.vy < 0) { r.vy = 0; burst(player.off, gy + roof, 5, 0.3, lane.side, '#ffffff'); }
@@ -1082,7 +1090,7 @@ function updateDroppedCoin(lane, o, dt) {
   o.grace -= dt;
   if (o.vy === null) return;
   o.vy += 1400 * dt; o.y += o.vy * dt; o.d += o.vd * dt;
-  bounceOffCeiling(o, 14);
+  bounceOffCeiling(o, 14, lane.side);
   let rest = surfaceAt(lane, o.d, o.y - 14);
   for (const p of lane.obs) if (p.type === 'platform' && Math.abs(p.d - o.d) < p.len / 2 && -p.h >= o.y - 20) rest = Math.min(rest, -p.h);
   if (o.vy > 0 && o.y >= rest - 14) {
@@ -1092,8 +1100,8 @@ function updateDroppedCoin(lane, o, dt) {
 }
 
 // Things flying upward under a tunnel or cave ceiling knock off it and drop back down.
-function bounceOffCeiling(o, r) {
-  const c = ceilingAt(o.d);
+function bounceOffCeiling(o, r, side) {
+  const c = ceilingAt(o.d, side);
   if (c !== null && o.vy < 0 && o.y - r < c) { o.y = c + r; o.vy *= -0.4; }
 }
 const overlaps = (a, b) => a.d0 < b.d1 && a.d1 > b.d0 && a.y0 < b.y1 && a.y1 > b.y0;
@@ -1305,7 +1313,7 @@ function updateBolt(lane, o, dt, gy) {
   }
   // the ground (or the floor of a tunnel), and any ceiling, checked at a few points along the way
   for (let k = 1; k <= 4; k++) {
-    const t = k / 4, x = x0 + (x1 - x0) * t, y = o.y - (1 - t) * o.vy * dt, c = ceilingAt(x);
+    const t = k / 4, x = x0 + (x1 - x0) * t, y = o.y - (1 - t) * o.vy * dt, c = ceilingAt(x, lane.side);
     if (t >= first) break;
     if (y >= floorAt(lane, x) || (c !== null && y <= c)) { first = t; target = 'ground'; break; }
   }
@@ -1346,7 +1354,7 @@ function updateStar(lane, o, dt, gy) {
     if (t >= 0 && t < first) { first = t; hit = true; }
   }
   for (let j = 1; j <= 4; j++) {  // the ground (a tunnel floor, a pond bed) or a ceiling, at a few points along the way
-    const t = j / 4, x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t - gy, c = ceilingAt(x);
+    const t = j / 4, x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t - gy, c = ceilingAt(x, lane.side);
     if (t >= first) break;
     if (y >= floorAt(lane, x) || (c !== null && y <= c)) { first = t; hit = true; break; }
   }
@@ -1365,7 +1373,7 @@ function shatterStar(lane, o, x, y) {
 // Grenades fly in an arc and bounce off whatever floor is under them; the second bounce sets them off.
 function updateGrenade(lane, o, dt, gy) {
   o.t += dt; o.vy += 1400 * dt; o.y += o.vy * dt; o.d += o.vd * dt;  // carried along at the runner's pace, like shurikens
-  bounceOffCeiling(o, 8);
+  bounceOffCeiling(o, 8, lane.side);
   let rest = surfaceAt(lane, o.d, o.y - 8);
   for (const p of lane.obs) if (p.type === 'platform' && Math.abs(p.d - o.d) < p.len / 2 && -p.h >= o.y - 20) rest = Math.min(rest, -p.h);
   if (o.vy > 0 && o.y >= rest - 8) {
@@ -2340,7 +2348,7 @@ function drawBiomeBack(lane, gy, half) {
 // A tunnel's is flat and trimmed like the platforms; a cave's is jagged, with a few glowworms in it.
 function drawCeiling(lane, gy, sky, half) {
   const b = game.biome, cave = b.kind === 'cave', step = cave ? 3 : 6, pts = [];
-  for (let x = -10; x <= half + 16; x += step) { const c = ceilingAt(x); pts.push([x, c === null ? -30 : Math.max(-30, gy + c)]); }
+  for (let x = -10; x <= half + 16; x += step) { const c = ceilingAt(x, lane.side); pts.push([x, c === null ? -30 : Math.max(-30, gy + c)]); }
   ctx.save();
   ctx.fillStyle = INK; ctx.beginPath(); ctx.moveTo(-10, -30);
   for (const [x, y] of pts) ctx.lineTo(x, y);
@@ -2356,7 +2364,7 @@ function drawCeiling(lane, gy, sky, half) {
     const C = BIOME.cave, u0 = distance - b.start;
     for (let i = Math.floor((u0 - 20) / C.tooth); (i * C.tooth - u0) < half + 20; i++) {
       if (i < 0 || hash01(b.seed * 7 + i) > 0.22) continue;
-      const x = i * C.tooth - u0 + C.tooth * (0.15 + hash01(i + b.seed) * 0.7), c = ceilingAt(x);
+      const x = i * C.tooth - u0 + C.tooth * (0.15 + hash01(i + b.seed) * 0.7), c = ceilingAt(x, lane.side);
       if (c === null || gy + c < 0) continue;
       const y = gy + c - 6 - hash01(i * 3 + b.seed) * 14, a = 0.45 + 0.35 * Math.sin(time * 2.3 + i * 1.7);
       ctx.shadowColor = sky.accent; ctx.shadowBlur = 10; ctx.fillStyle = `rgba(${sky.glow},${a.toFixed(2)})`;
