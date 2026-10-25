@@ -364,13 +364,14 @@ const STAR = { y: 46, enemySpeed: 160, windup: 0.3, cooldown: 1.5, waterDrag: 0.
 const SHURIKEN_DROP_WEIGHTS = [0, 0, 4, 8, 12, 14, 14, 13, 11, 9, 7, 5, 3];  // index = how many a thrower drops (2-12, usually 4-8)
 const NINJA_CHANCE = 0.25;  // chance a plain enemy spawns as a thrower instead (about 2.5 walkers per ninja overall)
 // Knife guys: walkers that hit harder and, instead of just walking into you, stab from a short way off.
-// They wind up (blade flashes red) once you're about to be in reach, then jab at chest height: hit
-// them first (every weapon outreaches the blade) or jump it. Their stab and their body both do DAMAGE.knifer.
+// Once you're about to be in reach they raise the knife overhead, then bring it down in a stab that
+// ends at chest height in front of them: hit them first (every weapon outreaches the blade) or jump it. Their stab and their body both do DAMAGE.knifer.
 const KNIFER = {
   chance: 0.15,                     // chance a plain walker (not a ninja) spawns with a knife
-  reach: 36,                        // how far past his body the blade reaches
-  zone: { lo: 40, hi: 68 },         // the height band the stab covers, above his feet
-  windup: 0.3, stab: 0.24, cooldown: 1.0,
+  reach: 42,                        // how far past his body the blade reaches (where the drawn tip ends up)
+  zone: { lo: 40, hi: 75 },         // the height band the stab covers, above his feet
+  windup: 0.35, stab: 0.24, cooldown: 1.0,
+  live: [0.25, 0.85],               // the part of the stab (0-1) that hurts: from when the blade comes down in front
   knifeDrop: 0.1,
 };
 // Brutes show up once Gronk is down: slow and thick, swinging a huge axe in an overhead arc that
@@ -1120,7 +1121,7 @@ function update(dt) {
         o.swingHit = true; hurtRunner(lane, DAMAGE.axe, gy, {}, true); shake = Math.max(shake, 10);
       }
       // a knife guy's stab hurts anywhere along the blade while it's going out
-      if (o.kind === 'knifer' && o.stabT > 0 && !o.stabHit && r.invuln <= 0 && overlaps(knifeZone(o, gy), pb)) {
+      if (o.kind === 'knifer' && knifeLive(o) && !o.stabHit && r.invuln <= 0 && overlaps(knifeZone(o, gy), pb)) {
         o.stabHit = true; hurtRunner(lane, DAMAGE.knifer, gy, {}, true);
       }
       // Each punch can hit each enemy once; both runners punch, so it lands in either lane
@@ -1277,11 +1278,12 @@ function updateThrower(lane, o, dt) {
 }
 
 // Knife guys: once you're about to walk into reach, wind up, then stab (live for the first part of it).
-const knifeLive = o => o.stabT > KNIFER.stab * 0.4;
+const knifeK = o => 1 - o.stabT / KNIFER.stab;
+const knifeLive = o => o.stabT > 0 && knifeK(o) >= KNIFER.live[0] && knifeK(o) < KNIFER.live[1];
 const knifeZone = (o, gy) => ({ d0: o.d - 14 - KNIFER.reach, d1: o.d, y0: gy + o.y - KNIFER.zone.hi, y1: gy + o.y - KNIFER.zone.lo });
 function updateKnifer(lane, o, dt) {
   o.cd -= dt;
-  if (o.stabT > 0) { o.stabT -= dt; if (!knifeLive(o)) o.stabHit = true; return; }
+  if (o.stabT > 0) { o.stabT -= dt; return; }
   if (o.windT > 0) {
     o.windT -= dt;
     if (o.windT <= 0) { o.stabT = KNIFER.stab; o.stabHit = false; o.cd = KNIFER.cooldown; }
@@ -1289,7 +1291,7 @@ function updateKnifer(lane, o, dt) {
   }
   // start winding up when the ground scrolling in will bring you into reach right as the stab lands
   const gap = o.d - 14 - KNIFER.reach - (player.off + 11);
-  if (o.cd <= 0 && o.d < W / 2 - 20 && o.d - 14 > player.off - 5 && gap < (speed + 25) * KNIFER.windup &&
+  if (o.cd <= 0 && o.d < W / 2 - 20 && o.d - 14 > player.off - 5 && gap < (speed + 25) * (KNIFER.windup + KNIFER.stab * KNIFER.live[0]) &&
       Math.abs(lane.body.y - o.y) < 90) o.windT = KNIFER.windup;
 }
 
@@ -2161,6 +2163,7 @@ function drawStick(x, gy, pose) {
   if (toss >= 0) arms[0] = tossArm(toss, aim), arms[1] = [-0.7, -0.3];  // off arm swings back for balance
   if (windup) arms[0] = [-2.5, -1.7];  // throwing arm cocked back behind the head
   if (throwing) arms[0] = [2.1, 1.75], arms[1] = [-0.9, 0.2];  // overhand whip, arm high and forward
+  if (pose.arm) arms[0] = pose.arm;  // the front arm posed directly (upper arm, forearm)
   if (deflect >= 0) {  // backhand swat sweeping up from low-front to overhead
     const k = Math.min(1, deflect * 1.6);
     arms[0] = [0.5 + k * 2.3, 1.0 + k * 1.9]; arms[1] = [-0.8, 0.3];
@@ -2203,9 +2206,20 @@ function drawStick(x, gy, pose) {
       ctx.beginPath(); ctx.arc(f[0] + 4, f[1], 5 + t * 10, -1.1, 1.1); ctx.stroke(); ctx.restore();
     }
   }
-  return hand;  // where the front hand ended up, for holding things
+  if (hand && !two) hand.push(shX, shY);
+  return hand;  // where the front hand ended up (then the shoulder), for holding things
 }
 
+// A knife guy's front arm (upper arm, forearm angles, as drawStick takes them): up at shoulder height
+// while he walks, raised overhead in the windup, then swept down and forward through the stab (k 0-1).
+const KNIFE_ARM = { carry: [0.55, 2.5], up: [3.3, 3.9], down: [1.5, 1.2] };
+function knifeArm(o, k) {
+  const { carry, up, down } = KNIFE_ARM, bob = Math.sin(o.t * 7) * 0.08;
+  if (k !== undefined) { const e = easeOut(k / 0.7); return [mix(up[0], down[0], e), mix(up[1], down[1], e)]; }
+  if (o.windT > 0) { const e = smooth(1 - o.windT / KNIFER.windup); return [mix(carry[0] + bob, up[0], e), mix(carry[1], up[1], e)]; }
+  return [carry[0] + bob, carry[1]];
+}
+const knifeTip = (sh, [a1, a2]) => [sh[0] + Math.sin(a1) * 14 + Math.sin(a2) * 38, sh[1] + Math.cos(a1) * 14 + Math.cos(a2) * 38];
 function drawEnemy(x, gy, o) {
   if (o.kind === 'brute') return drawBrute(x, gy, o);
   if (o.kind === 'piranha') return drawPiranha(x, gy, o);
@@ -2218,16 +2232,30 @@ function drawEnemy(x, gy, o) {
     if (o.windT > 0) pose = { ...pose, windup: true, lean: -0.1 - 0.25 * (1 - o.windT / STAR.windup) };
     else if (o.relT > 0) pose = { ...pose, throwing: true, lean: 0.15 + 0.35 * (o.relT / THROW_REL_T) };
   }
-  // Knife guy: draws the knife hand back to the chest and leans away, then jabs it straight out
-  let stab = -1;
-  if (knifer && o.windT > 0) pose = { ...pose, lean: 0.05 - 0.2 * (1 - o.windT / KNIFER.windup) };
-  if (knifer && o.stabT > 0) { stab = 0.55 * (1 - o.stabT / KNIFER.stab); pose = { ...pose, lean: 0.3 }; }
-  const hand = drawStick(x, gy, { ...pose, gear: o.gear, punch: knifer && (o.windT > 0 || stab >= 0) ? Math.max(0, stab) : -1 });
+  // Knife guy: carries the knife up at shoulder height, raises it overhead and leans back, then
+  // brings it down in a stab with the blade glowing red and a motion trail behind the tip
+  const stabbing = knifer && o.stabT > 0;
+  if (knifer && o.windT > 0) pose = { ...pose, lean: 0.05 - 0.2 * smooth(1 - o.windT / KNIFER.windup) };
+  if (stabbing) pose = { ...pose, lean: mix(-0.15, 0.3, easeOut(knifeK(o) / 0.7)) };
+  const arm = knifer ? knifeArm(o, stabbing ? knifeK(o) : undefined) : undefined;
+  const hand = drawStick(x, gy, { ...pose, gear: o.gear, arm });
   if (knifer && hand) {
-    const warn = o.windT > 0 ? 1 - o.windT / KNIFER.windup : 0;
+    if (stabbing) {
+      const k = knifeK(o), sh = [hand[2], hand[3]];
+      ctx.save(); ctx.lineCap = 'round';
+      for (let i = 0; i < 8; i++) {  // the trail: the tip's path over the last part of the stab, fading out behind
+        const k0 = Math.max(0, k - 0.45 * (1 - i / 8)), k1 = Math.max(0, k - 0.45 * (1 - (i + 1) / 8));
+        if (k1 <= k0) continue;
+        const p0 = knifeTip(sh, knifeArm(o, k0)), p1 = knifeTip(sh, knifeArm(o, k1)), a = (i + 1) / 8 * (1 - k);
+        ctx.globalAlpha = a * 0.5; ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 7; seg(p0[0], p0[1], p1[0], p1[1]);
+        ctx.globalAlpha = a * 0.8; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2.5; seg(p0[0], p0[1], p1[0], p1[1]);
+      }
+      ctx.restore();
+    }
+    const a2 = arm[1], dir = Math.atan2(Math.cos(a2), Math.sin(a2));  // the blade carries on along the forearm
     ctx.save();
-    if (warn > 0) { ctx.shadowColor = '#ff3b3b'; ctx.shadowBlur = 6 + warn * 14; }
-    drawKnife(hand[0], hand[1], o.windT > 0 || stab >= 0 ? 0 : 0.5 + Math.sin(o.t * 7) * 0.2, 0.8, warn > 0 ? '#ff3b3b' : INK);
+    if (stabbing) { ctx.shadowColor = '#ff3b3b'; ctx.shadowBlur = 14; }
+    drawKnife(hand[0] + Math.sin(a2) * 2.4, hand[1] + Math.cos(a2) * 2.4, dir, 0.8, INK, stabbing ? '#ff3b3b' : INK);
     ctx.restore();
   }
   if (thrower && o.relT > 0) {  // swoosh trailing the throwing hand
@@ -3061,11 +3089,11 @@ function drawBossUI() {
 
 // ---------- Hotbar & inventory screen ----------
 // A kitchen knife pointing along angle a from the hand at (x, y): a short grip behind, the blade out front.
-function drawKnife(x, y, a, s = 1, ink = INK) {
+function drawKnife(x, y, a, s = 1, ink = INK, blade = ink) {
   ctx.save(); ctx.translate(x, y); ctx.rotate(a); ctx.scale(s, s);
   ctx.strokeStyle = ctx.fillStyle = ink; ctx.lineCap = 'round';
   ctx.lineWidth = 5; seg(-8, 0, 2, 0);  // grip
-  ctx.beginPath(); ctx.moveTo(3, -3); ctx.lineTo(18, -3); ctx.quadraticCurveTo(24, -2, 27, 1); ctx.lineTo(3, 3.5); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = blade; ctx.beginPath(); ctx.moveTo(3, -3); ctx.lineTo(18, -3); ctx.quadraticCurveTo(24, -2, 27, 1); ctx.lineTo(3, 3.5); ctx.closePath(); ctx.fill();
   ctx.restore();
 }
 // An item's icon, centered on (x, y), about 40px across at s = 1. Light by default, for the dark slots.
